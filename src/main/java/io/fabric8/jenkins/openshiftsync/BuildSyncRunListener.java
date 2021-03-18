@@ -87,6 +87,8 @@ import jenkins.util.Timer;
 @Extension
 public class BuildSyncRunListener extends RunListener<Run> {
     private static final Logger logger = Logger.getLogger(BuildSyncRunListener.class.getName());
+    private static final String BLUEOCEAN_URL = "org.jenkinsci.plugins.blueoceandisplayurl.BlueOceanDisplayURLImpl";
+    private static final String GET_RUN_URL = "getRunURL";
 
     private long pollPeriodMs = 1000 * 5; // 5 seconds
     private long delayPollPeriodMs = 1000; // 1 seconds
@@ -276,48 +278,15 @@ public class BuildSyncRunListener extends RunListener<Run> {
 
         String namespace = OpenShiftUtils.getNamespacefromPodInputs();
         String ns = cause.getNamespace();
-        if (namespace == null)
+        if (namespace == null) {
             namespace = ns;
+
+        }
         String rootUrl = OpenShiftUtils.getJenkinsURL(getAuthenticatedOpenShiftClient(), namespace);
         String buildUrl = joinPaths(rootUrl, run.getUrl());
         String logsUrl = joinPaths(buildUrl, "/consoleText");
         String logsConsoleUrl = joinPaths(buildUrl, "/console");
-        String logsBlueOceanUrl = null;
-        try {
-            // there are utility functions in the blueocean-dashboard plugin
-            // which construct
-            // the entire blueocean URI; however, attempting to pull that in as
-            // a maven dependency was untenable from an injected test
-            // perspective;
-            // so we are leveraging reflection;
-            Jenkins jenkins = Jenkins.getInstance();
-            // NOTE, the excessive null checking is to keep `mvn findbugs:gui`
-            // quiet
-            if (jenkins != null) {
-                PluginManager pluginMgr = jenkins.getPluginManager();
-                if (pluginMgr != null) {
-                    ClassLoader cl = pluginMgr.uberClassLoader;
-                    if (cl != null) {
-                        Class weburlbldr = cl
-                                .loadClass("org.jenkinsci.plugins.blueoceandisplayurl.BlueOceanDisplayURLImpl");
-                        Constructor ctor = weburlbldr.getConstructor();
-                        Object displayURL = ctor.newInstance();
-                        Method getRunURLMethod = weburlbldr.getMethod("getRunURL", hudson.model.Run.class);
-                        Object blueOceanURI = getRunURLMethod.invoke(displayURL, run);
-                        logsBlueOceanUrl = blueOceanURI.toString();
-                        logsBlueOceanUrl = logsBlueOceanUrl.replaceAll("http://unconfigured-jenkins-location/", "");
-                        if (logsBlueOceanUrl.startsWith("http://") || logsBlueOceanUrl.startsWith("https://"))
-                            // still normalize string
-                            logsBlueOceanUrl = joinPaths("", logsBlueOceanUrl);
-                        else
-                            logsBlueOceanUrl = joinPaths(rootUrl, logsBlueOceanUrl);
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            if (logger.isLoggable(Level.FINE))
-                logger.log(Level.FINE, "upsertBuild", t);
-        }
+        String logsBlueOceanUrl = getBlueOceanLogsUrl(run, rootUrl);
 
         Map<String, BlueRunResult> blueRunResults = new HashMap<String, BlueRunResult>();
         if (blueRun != null && blueRun.getNodes() != null) {
@@ -402,7 +371,6 @@ public class BuildSyncRunListener extends RunListener<Run> {
         String completionTime = null;
         if (started > 0) {
             startTime = formatTimestamp(started);
-
             long duration = getDuration(run);
             if (duration > 0) {
                 completionTime = formatTimestamp(started + duration);
@@ -412,7 +380,6 @@ public class BuildSyncRunListener extends RunListener<Run> {
         String name = cause.getName();
         logger.log(FINE, "Patching build {0}/{1}: setting phase to {2}", new Object[] { ns, name, phase });
         try {
-
             Map<String, String> annotations = new HashMap<String, String>();
             annotations.put(OPENSHIFT_ANNOTATIONS_JENKINS_STATUS_JSON, json);
             annotations.put(OPENSHIFT_ANNOTATIONS_JENKINS_BUILD_URI, buildUrl);
@@ -442,6 +409,43 @@ public class BuildSyncRunListener extends RunListener<Run> {
         cause.setNumFlowNodes(newNumFlowNodes);
         cause.setNumStages(newNumStages);
         cause.setLastUpdateToOpenshift(TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
+    }
+
+    private String getBlueOceanLogsUrl(Run run, String rootUrl) {
+        String logsBlueOceanUrl = null;
+        try {
+            // there are utility functions in the blueocean-dashboard plugin which construct
+            // the entire blueocean URI; however, attempting to pull that in
+            // as a maven dependency was untenable from an injected test perspective; so we
+            // are leveraging reflection;
+            Jenkins jenkins = Jenkins.getInstance();
+            // NOTE, the excessive null checking is to keep `mvn findbugs:gui` quiet
+            if (jenkins != null) {
+                PluginManager pluginManager = jenkins.getPluginManager();
+                if (pluginManager != null) {
+                    ClassLoader cl = pluginManager.uberClassLoader;
+                    if (cl != null) {
+                        Class webUrlBuilder = cl.loadClass(BLUEOCEAN_URL);
+                        Constructor ctor = webUrlBuilder.getConstructor();
+                        Object displayURL = ctor.newInstance();
+                        Method getRunURLMethod = webUrlBuilder.getMethod(GET_RUN_URL, hudson.model.Run.class);
+                        Object blueOceanURI = getRunURLMethod.invoke(displayURL, run);
+                        logsBlueOceanUrl = blueOceanURI.toString();
+                        logsBlueOceanUrl = logsBlueOceanUrl.replaceAll("http://unconfigured-jenkins-location/", "");
+                        if (logsBlueOceanUrl.startsWith("http://") || logsBlueOceanUrl.startsWith("https://")) {
+                            // still normalize string
+                            logsBlueOceanUrl = joinPaths("", logsBlueOceanUrl);
+                        } else {
+                            logsBlueOceanUrl = joinPaths(rootUrl, logsBlueOceanUrl);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            if (logger.isLoggable(Level.FINE))
+                logger.log(Level.FINE, "upsertBuild", t);
+        }
+        return logsBlueOceanUrl;
     }
 
     // annotate the Build with pending input JSON so consoles can do the
