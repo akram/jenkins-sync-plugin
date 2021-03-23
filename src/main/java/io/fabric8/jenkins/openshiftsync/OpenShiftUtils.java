@@ -466,9 +466,8 @@ public class OpenShiftUtils {
         String ns = build.getMetadata().getNamespace();
         String name = build.getMetadata().getName();
         logger.log(FINE, "setting build to {0} in namespace {1}/{2}", new Object[] { phase, ns, name });
-
-        BuildBuilder builder = new BuildBuilder().editStatus().withPhase(phase).endStatus();
-        getAuthenticatedOpenShiftClient().builds().inNamespace(ns).withName(name).edit(b -> builder.build());
+        getAuthenticatedOpenShiftClient().builds().inNamespace(ns).withName(name)
+                .edit(b -> new BuildBuilder(b).editStatus().withPhase(phase).endStatus().build());
     }
 
     /**

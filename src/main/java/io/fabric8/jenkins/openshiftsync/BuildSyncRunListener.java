@@ -69,9 +69,13 @@ import hudson.model.Run;
 import hudson.model.TaskListener;
 import hudson.model.listeners.RunListener;
 import hudson.triggers.SafeTimerTask;
+import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.fabric8.kubernetes.client.dsl.LogWatch;
 import io.fabric8.openshift.api.model.Build;
 import io.fabric8.openshift.api.model.BuildBuilder;
+import io.fabric8.openshift.api.model.BuildStatus;
+import io.fabric8.openshift.client.dsl.BuildResource;
 import io.jenkins.blueocean.rest.factory.BlueRunFactory;
 import io.jenkins.blueocean.rest.model.BluePipelineNode;
 import io.jenkins.blueocean.rest.model.BlueRun;
@@ -393,11 +397,17 @@ public class BuildSyncRunListener extends RunListener<Run> {
             if (pendingActions != null && !pendingActions.isEmpty()) {
                 annotations.put(OPENSHIFT_ANNOTATIONS_JENKINS_PENDING_INPUT_ACTION_JSON, pendingActions);
             }
-            BuildBuilder builder = new BuildBuilder().editMetadata().withAnnotations(annotations).endMetadata()
-                    .editStatus().withPhase(phase).withStartTimestamp(startTime).withCompletionTimestamp(completionTime)
-                    .endStatus();
-            logger.log(INFO, "Creating a new build builder: " + builder);
-            getAuthenticatedOpenShiftClient().builds().inNamespace(ns).withName(name).edit(b -> builder.build());
+            final String effectiveStartTime = startTime;    
+            final String effectiveCompletionTime = completionTime;
+            BuildResource<Build, LogWatch> build = getAuthenticatedOpenShiftClient().builds().inNamespace(ns)
+                    .withName(name);
+            ObjectMeta metadata = build.get().getMetadata();
+            BuildStatus status = build.get().getStatus();
+            logger.log(INFO, "Editing build {0} metadata is {1} , status is: {2}",
+                    new Object[] { build, metadata, status });
+            build.edit(b -> new BuildBuilder(b).editMetadata().addToAnnotations(annotations).endMetadata().editStatus()
+                    .withPhase(phase).withStartTimestamp(effectiveStartTime)
+                    .withCompletionTimestamp(effectiveCompletionTime).endStatus().build());
         } catch (KubernetesClientException e) {
             if (HTTP_NOT_FOUND == e.getCode()) {
                 runsToPoll.remove(run);
