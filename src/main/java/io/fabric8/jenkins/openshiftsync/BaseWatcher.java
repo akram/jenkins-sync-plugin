@@ -19,6 +19,7 @@ import static java.net.HttpURLConnection.HTTP_GONE;
 
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.Watch;
+import io.fabric8.kubernetes.client.WatcherException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -78,6 +79,27 @@ public abstract class BaseWatcher {
             entry.getValue().close();
             watches.remove(entry.getKey());
         }
+    }
+
+    public void onClose(WatcherException e, String namespace) {
+        //scans of fabric client confirm this call be called with null
+        //we do not want to totally ignore this, as the closing of the
+        //watch can effect responsiveness
+        LOGGER.info("Watch for type " + this.getClass().getName() + " closed for one of the following namespaces: " + watches.keySet().toString());
+        if (e != null) {
+            LOGGER.warning(e.toString());
+
+            if (e.isHttpGone()) {
+                LOGGER.info("Got HTTP_GONE: " + e + " while watching namespace: " + namespace);
+                stop();
+                start();
+            }
+        }
+        // clearing the watches here will signal the extending classes
+        // to attempt to re-establish the watch the next time they attempt
+        // to list; should shield from rapid/repeated close/reopen cycles
+        // doing it in this fashion
+        watches.remove(namespace);
     }
 
     public void onClose(KubernetesClientException e, String namespace) {

@@ -17,6 +17,7 @@ package io.fabric8.jenkins.openshiftsync;
 
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.Watcher;
+import io.fabric8.kubernetes.client.WatcherException;
 
 public class WatcherCallback<T> implements Watcher<T> {
     
@@ -39,4 +40,8 @@ public class WatcherCallback<T> implements Watcher<T> {
         watcher.onClose(cause, namespace);
     }
 
+    @Override
+    public void onClose(WatcherException cause) {
+        watcher.onClose(cause, namespace);
+    }
 }

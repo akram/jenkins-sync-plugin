@@ -163,7 +163,7 @@
       <groupId>io.fabric8</groupId>
       <artifactId>kubernetes-client</artifactId>
       <version>4.13.2</version>
-      <scope>provided</scope>
+      <scope>compile</scope>
     </dependency>
 
     <dependency>
