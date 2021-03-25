@@ -15,16 +15,21 @@
  */
 package io.fabric8.jenkins.openshiftsync;
 
+import java.util.Collections;
+import java.util.Map;
+import java.util.logging.Logger;
+
 import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.fabric8.kubernetes.client.Watch;
 import io.fabric8.kubernetes.client.Watcher;
 
 public class WatcherCallback<T> implements Watcher<T> {
-    
+    private final Logger LOGGER = Logger.getLogger(getClass().getName());
+
     private final BaseWatcher watcher;
     private final String namespace;
 
-    public WatcherCallback(BaseWatcher w,
-            String n) {
+    public WatcherCallback(BaseWatcher w, String n) {
         watcher = w;
         namespace = n;
     }
@@ -36,7 +41,9 @@ public class WatcherCallback<T> implements Watcher<T> {
 
     @Override
     public void onClose(KubernetesClientException cause) {
+        LOGGER.info("WatcherCallback closing watcher: " + watcher + ", cause: " + cause);
         watcher.onClose(cause, namespace);
+        Map<String, Watch> watches = Collections.synchronizedMap(watcher.getWatches());
+        watches.remove(namespace);
     }
-
 }

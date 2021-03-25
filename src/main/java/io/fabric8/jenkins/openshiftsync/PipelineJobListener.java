@@ -15,21 +15,14 @@
  */
 package io.fabric8.jenkins.openshiftsync;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-
-import com.google.common.base.Objects;
-
-import hudson.Extension;
-import hudson.model.Item;
-import hudson.model.ItemGroup;
-import hudson.model.listeners.ItemListener;
-import io.fabric8.kubernetes.api.model.ObjectMeta;
-import io.fabric8.kubernetes.client.KubernetesClientException;
-import io.fabric8.openshift.api.model.*;
-
-import org.apache.commons.lang.StringUtils;
-import org.jenkinsci.plugins.workflow.job.WorkflowJob;
-import org.kohsuke.stapler.DataBoundConstructor;
+import static io.fabric8.jenkins.openshiftsync.Annotations.GENERATED_BY;
+import static io.fabric8.jenkins.openshiftsync.Annotations.GENERATED_BY_JENKINS;
+import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.removeJobWithBuildConfig;
+import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMapper.updateBuildConfigFromJob;
+import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_LABELS_BUILD_CONFIG_GIT_REPOSITORY_NAME;
+import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getAuthenticatedOpenShiftClient;
+import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getOpenShiftClient;
+import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -37,12 +30,27 @@ import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.removeJobWithBuildConfig;
-import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMapper.updateBuildConfigFromJob;
-import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_LABELS_BUILD_CONFIG_GIT_REPOSITORY_NAME;
-import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getAuthenticatedOpenShiftClient;
-import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getOpenShiftClient;
-import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
+import org.apache.commons.lang.StringUtils;
+import org.jenkinsci.plugins.workflow.job.WorkflowJob;
+import org.kohsuke.stapler.DataBoundConstructor;
+
+import com.google.common.base.Objects;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import hudson.Extension;
+import hudson.model.Item;
+import hudson.model.ItemGroup;
+import hudson.model.listeners.ItemListener;
+import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.fabric8.openshift.api.model.BuildConfig;
+import io.fabric8.openshift.api.model.BuildConfigBuilder;
+import io.fabric8.openshift.api.model.BuildConfigList;
+import io.fabric8.openshift.api.model.BuildConfigSpec;
+import io.fabric8.openshift.api.model.BuildSource;
+import io.fabric8.openshift.api.model.BuildStrategy;
+import io.fabric8.openshift.api.model.GitBuildSource;
+import io.fabric8.openshift.api.model.JenkinsPipelineBuildStrategy;
 
 /**
  * Listens to {@link WorkflowJob} objects being updated via the web console or
@@ -65,7 +73,6 @@ public class PipelineJobListener extends ItemListener {
     @DataBoundConstructor
     @SuppressFBWarnings("EI_EXPOSE_REP2")
     public PipelineJobListener(String server, String[] namespaces, String jobNamePattern) {
-
         this.server = server;
         this.namespace = namespaces[0];
         this.jobNamePattern = jobNamePattern;
@@ -74,12 +81,14 @@ public class PipelineJobListener extends ItemListener {
 
     @Override
     public String toString() {
-        return "PipelineJobListener{" + "server='" + server + '\'' + ", namespace='" + namespace + '\'' + ", jobNamePattern='" + jobNamePattern + '\'' + '}';
+        return "PipelineJobListener{" + "server='" + server + '\'' + ", namespace='" + namespace + '\''
+                + ", jobNamePattern='" + jobNamePattern + '\'' + '}';
     }
 
     private void init() {
         // Use namespace.split here to simulate passing an array of strings
-        namespace = OpenShiftUtils.getNamespaceOrUseDefault(((namespace != null) ? namespace.split(" ") : null), getOpenShiftClient())[0];
+        namespace = OpenShiftUtils.getNamespaceOrUseDefault(((namespace != null) ? namespace.split(" ") : null),
+                getOpenShiftClient())[0];
     }
 
     @Override
@@ -111,31 +120,38 @@ public class PipelineJobListener extends ItemListener {
             BuildConfigProjectProperty property = buildConfigProjectForJob(job);
             if (property != null) {
 
-                NamespaceName buildName = OpenShiftUtils.buildConfigNameFromJenkinsJobName(job.getName(), job.getProperty(BuildConfigProjectProperty.class).getNamespace());
+                NamespaceName buildName = OpenShiftUtils.buildConfigNameFromJenkinsJobName(job.getName(),
+                        job.getProperty(BuildConfigProjectProperty.class).getNamespace());
 
                 String namespace = buildName.getNamespace();
                 String buildConfigName = buildName.getName();
-                BuildConfig buildConfig = getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(namespace).withName(buildConfigName).get();
+                BuildConfig buildConfig = getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(namespace)
+                        .withName(buildConfigName).get();
                 if (buildConfig != null) {
                     boolean generatedBySyncPlugin = false;
                     Map<String, String> annotations = buildConfig.getMetadata().getAnnotations();
                     if (annotations != null) {
-                        generatedBySyncPlugin = Annotations.GENERATED_BY_JENKINS.equals(annotations.get(Annotations.GENERATED_BY));
+                        generatedBySyncPlugin = Annotations.GENERATED_BY_JENKINS
+                                .equals(annotations.get(Annotations.GENERATED_BY));
                     }
                     try {
                         if (!generatedBySyncPlugin) {
-                            logger.info("BuildConfig " + property.getNamespace() + "/" + property.getName() + " will not" + " be deleted since it was not created by " + " the sync plugin");
+                            logger.info("BuildConfig " + property.getNamespace() + "/" + property.getName()
+                                    + " will not" + " be deleted since it was not created by " + " the sync plugin");
                         } else {
                             logger.info("Deleting BuildConfig " + property.getNamespace() + "/" + property.getName());
-                            getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(namespace).withName(buildConfigName).delete();
+                            getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(namespace)
+                                    .withName(buildConfigName).delete();
 
                         }
                     } catch (KubernetesClientException e) {
                         if (HTTP_NOT_FOUND != e.getCode()) {
-                            logger.log(Level.WARNING, "Failed to delete BuildConfig in namespace: " + namespace + " for name: " + buildConfigName, e);
+                            logger.log(Level.WARNING, "Failed to delete BuildConfig in namespace: " + namespace
+                                    + " for name: " + buildConfigName, e);
                         }
                     } catch (Exception e) {
-                        logger.log(Level.WARNING, "Failed to delete BuildConfig in namespace: " + namespace + " for name: " + buildConfigName, e);
+                        logger.log(Level.WARNING, "Failed to delete BuildConfig in namespace: " + namespace
+                                + " for name: " + buildConfigName, e);
                     } finally {
                         removeJobWithBuildConfig(buildConfig);
                     }
@@ -167,15 +183,17 @@ public class PipelineJobListener extends ItemListener {
 
     private void upsertWorkflowJob(WorkflowJob job) {
         BuildConfigProjectProperty property = buildConfigProjectForJob(job);
-        if (property != null && (!BuildConfigWatcher.isDeleteInProgress(property.getNamespace() + property.getName()))) {
-            logger.info("Upsert WorkflowJob " + job.getName() + " to BuildConfig: " + property.getNamespace() + "/" + property.getName() + " in OpenShift");
+        if (property != null
+                && (!BuildConfigWatcher.isDeleteInProgress(property.getNamespace() + property.getName()))) {
+            logger.info("Upsert WorkflowJob " + job.getName() + " to BuildConfig: " + property.getNamespace() + "/"
+                    + property.getName() + " in OpenShift");
             upsertBuildConfigForJob(job, property);
         }
     }
 
     /**
-     * Returns the mapping of the jenkins workflow job to a qualified namespace
-     * and BuildConfig name
+     * Returns the mapping of the jenkins workflow job to a qualified namespace and
+     * BuildConfig name
      */
     private BuildConfigProjectProperty buildConfigProjectForJob(WorkflowJob job) {
 
@@ -183,7 +201,8 @@ public class PipelineJobListener extends ItemListener {
 
         if (property != null) {
             if (StringUtils.isNotBlank(property.getNamespace()) && StringUtils.isNotBlank(property.getName())) {
-                logger.info("Found BuildConfigProjectProperty for namespace: " + property.getNamespace() + " name: " + property.getName());
+                logger.info("Found BuildConfigProjectProperty for namespace: " + property.getNamespace() + " name: "
+                        + property.getName());
                 return property;
             }
         }
@@ -191,7 +210,8 @@ public class PipelineJobListener extends ItemListener {
         String patternRegex = this.jobNamePattern;
         String jobName = JenkinsUtils.getFullJobName(job);
         if (StringUtils.isNotEmpty(jobName) && StringUtils.isNotEmpty(patternRegex) && jobName.matches(patternRegex)) {
-            String buildConfigName = OpenShiftUtils.convertNameToValidResourceName(JenkinsUtils.getBuildConfigName(job));
+            String buildConfigName = OpenShiftUtils
+                    .convertNameToValidResourceName(JenkinsUtils.getBuildConfigName(job));
 
             // we will update the uuid when we create the BC
             String uuid = null;
@@ -200,7 +220,8 @@ public class PipelineJobListener extends ItemListener {
             String resourceVersion = null;
             String buildRunPolicy = "Serial";
 
-            logger.info("Creating BuildConfigProjectProperty for namespace: " + namespace + " name: " + buildConfigName);
+            logger.info(
+                    "Creating BuildConfigProjectProperty for namespace: " + namespace + " name: " + buildConfigName);
             if (property != null) {
                 property.setNamespace(namespace);
                 property.setName(buildConfigName);
@@ -209,62 +230,73 @@ public class PipelineJobListener extends ItemListener {
                 }
                 return property;
             } else {
-                return new BuildConfigProjectProperty(namespace, buildConfigName, uuid, resourceVersion, buildRunPolicy);
+                return new BuildConfigProjectProperty(namespace, buildConfigName, uuid, resourceVersion,
+                        buildRunPolicy);
             }
         }
         return null;
     }
 
-  /*Right now, when the buildconfig name is different then git repo name
-  then sync plugin is not able to find buildconfig by repo name while
-  syncing back to openshift after creating a buildconfig with strategy
-  JenkinsPipeline, and create a new buildconfig repo name, To fix this
-  issue, added a label of gitRepository name so it will first try to
-  find the BuildConfig with name of jenkins job, if that is not present
-  that is our case then it will also try to find the buildconfig having
-  label with the name of jenkins job and then if it is not present will
-  create a new BuildConfig*/
+    /*
+     * Right now, when the buildconfig name is different then git repo name then
+     * sync plugin is not able to find buildconfig by repo name while syncing back
+     * to openshift after creating a buildconfig with strategy JenkinsPipeline, and
+     * create a new buildconfig repo name, To fix this issue, added a label of
+     * gitRepository name so it will first try to find the BuildConfig with name of
+     * jenkins job, if that is not present that is our case then it will also try to
+     * find the buildconfig having label with the name of jenkins job and then if it
+     * is not present will create a new BuildConfig
+     */
 
     private void upsertBuildConfigForJob(WorkflowJob job, BuildConfigProjectProperty buildConfigProjectProperty) {
         boolean create = false;
-        logger.info("Finding BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() + " name: " +
-             buildConfigProjectProperty.getName());
-        BuildConfig jobBuildConfig = getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(buildConfigProjectProperty.getNamespace()).withName(buildConfigProjectProperty.getName()).get();
+        logger.info("Finding BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() + " name: "
+                + buildConfigProjectProperty.getName());
+        BuildConfig jobBuildConfig = getAuthenticatedOpenShiftClient().buildConfigs()
+                .inNamespace(buildConfigProjectProperty.getNamespace()).withName(buildConfigProjectProperty.getName())
+                .get();
 
+        if (jobBuildConfig == null) {
 
-        if (jobBuildConfig == null){
+            logger.info("Not able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace()
+                    + " name: " + buildConfigProjectProperty.getName());
 
-            logger.info("Not able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() + " name: " +
-                buildConfigProjectProperty.getName());
+            logger.info("Finding BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace()
+                    + " with label gitRepository: " + buildConfigProjectProperty.getName());
 
-            logger.info("Finding BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() +
-                " with label gitRepository: " + buildConfigProjectProperty.getName());
+            BuildConfigList jobBuildConfigs = getOpenShiftClient().buildConfigs()
+                    .inNamespace(buildConfigProjectProperty.getNamespace())
+                    .withLabels(Collections.singletonMap(OPENSHIFT_LABELS_BUILD_CONFIG_GIT_REPOSITORY_NAME,
+                            buildConfigProjectProperty.getName()))
+                    .list();
 
-            BuildConfigList jobBuildConfigs = getOpenShiftClient().buildConfigs().
-                inNamespace(buildConfigProjectProperty.getNamespace())
-                .withLabels(Collections.singletonMap(OPENSHIFT_LABELS_BUILD_CONFIG_GIT_REPOSITORY_NAME, buildConfigProjectProperty.getName())).list();
-
-            /*Always choose the first one because launcher(https://github.com/fabric8-launcher/launcher-backend) will create
-              a single pipeline for a git repo and this will always return one if exists and nothing if does not exist*/
-            if (!jobBuildConfigs.getItems().isEmpty()){
+            /*
+             * Always choose the first one because
+             * launcher(https://github.com/fabric8-launcher/launcher-backend) will create a
+             * single pipeline for a git repo and this will always return one if exists and
+             * nothing if does not exist
+             */
+            if (!jobBuildConfigs.getItems().isEmpty()) {
                 jobBuildConfig = jobBuildConfigs.getItems().get(0);
-                logger.info("Able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() +
-                    " with label gitRepository: " + buildConfigProjectProperty.getName());
+                logger.info("Able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace()
+                        + " with label gitRepository: " + buildConfigProjectProperty.getName());
             } else {
-                logger.info("Not able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() +
-                    " with label gitRepository: " + buildConfigProjectProperty.getName());
+                logger.info("Not able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace()
+                        + " with label gitRepository: " + buildConfigProjectProperty.getName());
             }
         } else {
-            logger.info("Able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() + " name: " +
-              buildConfigProjectProperty.getName());
+            logger.info("Able to find BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace()
+                    + " name: " + buildConfigProjectProperty.getName());
         }
 
         if (jobBuildConfig == null) {
 
             create = true;
-            jobBuildConfig = new BuildConfigBuilder().withNewMetadata().withName(buildConfigProjectProperty.getName()).withNamespace(buildConfigProjectProperty.getNamespace())
-                    .addToAnnotations(Annotations.GENERATED_BY, Annotations.GENERATED_BY_JENKINS).endMetadata().withNewSpec().withNewStrategy().withType("JenkinsPipeline").withNewJenkinsPipelineStrategy().endJenkinsPipelineStrategy()
-                    .endStrategy().endSpec().build();
+            jobBuildConfig = new BuildConfigBuilder().withNewMetadata().withName(buildConfigProjectProperty.getName())
+                    .withNamespace(buildConfigProjectProperty.getNamespace())
+                    .addToAnnotations(GENERATED_BY, GENERATED_BY_JENKINS).endMetadata()
+                    .withNewSpec().withNewStrategy().withType("JenkinsPipeline").withNewJenkinsPipelineStrategy()
+                    .endJenkinsPipelineStrategy().endStrategy().endSpec().build();
         } else {
 
             ObjectMeta metadata = jobBuildConfig.getMetadata();
@@ -288,24 +320,30 @@ public class PipelineJobListener extends ItemListener {
 
         // lets annotate with the job name
         if (create) {
-            OpenShiftUtils.addAnnotation(jobBuildConfig, Annotations.JENKINS_JOB_PATH, JenkinsUtils.getFullJobName(job));
+            OpenShiftUtils.addAnnotation(jobBuildConfig, Annotations.JENKINS_JOB_PATH,
+                    JenkinsUtils.getFullJobName(job));
         }
 
         if (create) {
             try {
-                logger.info("Creating BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace() +
-                    " with name: " + buildConfigProjectProperty.getName());
-                BuildConfig bc = getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(jobBuildConfig.getMetadata().getNamespace()).create(jobBuildConfig);
+                logger.info("Creating BuildConfig for namespace: " + buildConfigProjectProperty.getNamespace()
+                        + " with name: " + buildConfigProjectProperty.getName());
+                BuildConfig bc = getAuthenticatedOpenShiftClient().buildConfigs()
+                        .inNamespace(jobBuildConfig.getMetadata().getNamespace()).create(jobBuildConfig);
                 String uid = bc.getMetadata().getUid();
                 buildConfigProjectProperty.setUid(uid);
             } catch (Exception e) {
-                logger.log(Level.WARNING, "Failed to create BuildConfig: " + NamespaceName.create(jobBuildConfig) + ". " + e, e);
+                logger.log(Level.WARNING,
+                        "Failed to create BuildConfig: " + NamespaceName.create(jobBuildConfig) + ". " + e, e);
             }
         } else {
             try {
-                getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(jobBuildConfig.getMetadata().getNamespace()).withName(jobBuildConfig.getMetadata().getName()).cascading(false).replace(jobBuildConfig);
+                getAuthenticatedOpenShiftClient().buildConfigs()
+                        .inNamespace(jobBuildConfig.getMetadata().getNamespace())
+                        .withName(jobBuildConfig.getMetadata().getName()).cascading(false).replace(jobBuildConfig);
             } catch (Exception e) {
-                logger.log(Level.WARNING, "Failed to update BuildConfig: " + NamespaceName.create(jobBuildConfig) + ". " + e, e);
+                logger.log(Level.WARNING,
+                        "Failed to update BuildConfig: " + NamespaceName.create(jobBuildConfig) + ". " + e, e);
             }
         }
     }
@@ -346,7 +384,7 @@ public class PipelineJobListener extends ItemListener {
         GlobalPluginConfiguration config = GlobalPluginConfiguration.get();
         if (config != null) {
             this.jobNamePattern = config.getJobNamePattern();
-            this.namespace = (config.getNamespace()).split(" ")[0];
+            this.namespace = config.getNamespace();
             this.server = config.getServer();
         }
     }

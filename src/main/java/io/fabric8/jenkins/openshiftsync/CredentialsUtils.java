@@ -20,9 +20,11 @@ import hudson.security.ACL;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.Secret;
+import io.fabric8.kubernetes.client.Config;
 import io.fabric8.openshift.api.model.BuildConfig;
 import io.fabric8.openshift.api.model.BuildConfigSpec;
 import io.fabric8.openshift.api.model.BuildSource;
+import io.fabric8.openshift.client.OpenShiftClient;
 import jenkins.model.Jenkins;
 import org.acegisecurity.context.SecurityContext;
 import org.acegisecurity.context.SecurityContextHolder;
@@ -460,7 +462,10 @@ public class CredentialsUtils {
      * @return true if found.
      */
     public static boolean hasCredentials() {
-        return !StringUtils.isEmpty(getAuthenticatedOpenShiftClient().getConfiguration().getOauthToken());
+        OpenShiftClient client = getAuthenticatedOpenShiftClient();
+        Config configuration = client.getConfiguration();
+        String token = configuration.getOauthToken();
+        return !StringUtils.isEmpty(token);
     }
 
 }

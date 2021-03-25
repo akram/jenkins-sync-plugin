@@ -22,6 +22,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.logging.Level.SEVERE;
 import static jenkins.model.Jenkins.ADMINISTER;
 
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.apache.commons.lang.StringUtils;
@@ -32,12 +33,14 @@ import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 
 import hudson.Extension;
 import hudson.Util;
+import hudson.triggers.SafeTimerTask;
 import hudson.util.ListBoxModel;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import jenkins.model.GlobalConfiguration;
 import jenkins.model.Jenkins;
 import jenkins.util.Timer;
 import net.sf.json.JSONObject;
+import okhttp3.OkHttpClient;
 
 @Extension
 public class GlobalPluginConfiguration extends GlobalConfiguration {
@@ -46,6 +49,11 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
 
     private boolean enabled = true;
     private boolean foldersEnabled = true;
+    private boolean syncConfigMaps = true;
+    private boolean syncSecrets = true;
+    private boolean syncImageStreams = true;
+    private boolean syncBuildConfigsAndBuilds = true;
+
     private String server;
     private String credentialsId = "";
     private String[] namespaces;
@@ -63,12 +71,14 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
     private transient SecretWatcher secretWatcher;
     private transient ConfigMapWatcher configMapWatcher;
     private transient ImageStreamWatcher imageStreamWatcher;
+    private static SafeTimerTask TIMER_TASK;
 
     @DataBoundConstructor
     public GlobalPluginConfiguration(boolean enable, String server, String namespace, boolean foldersEnabled,
             String credentialsId, String jobNamePattern, String skipOrganizationPrefix, String skipBranchSuffix,
             int buildListInterval, int buildConfigListInterval, int configMapListInterval, int secretListInterval,
-            int imageStreamListInterval) {
+            int imageStreamListInterval, boolean syncConfigMaps, boolean syncSecrets, boolean syncImageStreams,
+            boolean syncBuildsConfigAndBuilds) {
         this.enabled = enable;
         this.server = server;
         this.namespaces = StringUtils.isBlank(namespace) ? null : namespace.split(" ");
@@ -82,7 +92,12 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
         this.configMapListInterval = configMapListInterval;
         this.secretListInterval = secretListInterval;
         this.imageStreamListInterval = imageStreamListInterval;
+        this.syncConfigMaps = syncConfigMaps;
+        this.syncSecrets = syncSecrets;
+        this.syncImageStreams = syncImageStreams;
+        this.syncBuildConfigsAndBuilds = syncBuildsConfigAndBuilds;
         configChange();
+        Logger.getLogger(OkHttpClient.class.getName()).setLevel(Level.FINE);
     }
 
     public GlobalPluginConfiguration() {
@@ -131,6 +146,38 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+    }
+
+    public boolean isSyncConfigMaps() {
+        return syncConfigMaps;
+    }
+
+    public void setSyncConfigMaps(boolean syncConfigMaps) {
+        this.syncConfigMaps = syncConfigMaps;
+    }
+
+    public boolean isSyncSecrets() {
+        return syncSecrets;
+    }
+
+    public void setSyncSecrets(boolean syncSecrets) {
+        this.syncSecrets = syncSecrets;
+    }
+
+    public boolean isSyncImageStreams() {
+        return syncImageStreams;
+    }
+
+    public void setSyncImageStreams(boolean syncImageStreams) {
+        this.syncImageStreams = syncImageStreams;
+    }
+
+    public boolean isSyncBuildConfigsAndBuilds() {
+        return syncBuildConfigsAndBuilds;
+    }
+
+    public void setSyncBuildConfigsAndBuilds(boolean syncBuildConfigsAndBuilds) {
+        this.syncBuildConfigsAndBuilds = syncBuildConfigsAndBuilds;
     }
 
     public String getServer() {
@@ -260,6 +307,7 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
     }
 
     private synchronized void configChange() {
+        OpenShiftUtils.initializeOpenShiftClient(this.server);
         logger.info("OpenShift Sync Plugin processing a newly supplied configuration");
         if (this.buildConfigWatcher != null) {
             this.buildConfigWatcher.stop();
@@ -281,7 +329,9 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
         this.configMapWatcher = null;
         this.imageStreamWatcher = null;
         this.secretWatcher = null;
-        OpenShiftUtils.shutdownOpenShiftClient();
+        // OpenShiftUtils.shutdownOpenShiftClient();
+//        DefaultOpenShiftClient client = (DefaultOpenShiftClient) getOpenShiftClient();
+//        client.getHttpClient().dispatcher().cancelAll();
 
         if (!this.enabled) {
             logger.info("OpenShift Sync Plugin has been disabled");
@@ -290,11 +340,38 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
         try {
             OpenShiftUtils.initializeOpenShiftClient(this.server);
             this.namespaces = getNamespaceOrUseDefault(this.namespaces, getOpenShiftClient());
-            Runnable task = new GlobalPluginConfigurationTimerTask(this);
-            Timer.get().schedule(task, 1, SECONDS); // lets give jenkins a while to get started ;)
+            if (TIMER_TASK != null) {
+                logger.info("Cancelling previous GlobalPluginConfigurationTimerTask: " + TIMER_TASK);
+                TIMER_TASK.cancel();
+                // Timer.get().shutdown(); // This breaks Jenkins
+                TIMER_TASK = null;
+            }
+            TIMER_TASK = new GlobalPluginConfigurationTimerTask(this);
+            Timer.get().schedule(TIMER_TASK, 1, SECONDS); // lets give jenkins a while to get started ;)
         } catch (KubernetesClientException e) {
             Throwable exceptionOrCause = (e.getCause() != null) ? e.getCause() : e;
             logger.log(SEVERE, "Failed to configure OpenShift Jenkins Sync Plugin: " + exceptionOrCause);
         }
     }
+
+    public BuildWatcher getBuildWatcher() {
+        return buildWatcher;
+    }
+
+    public BuildConfigWatcher getBuildConfigWatcher() {
+        return buildConfigWatcher;
+    }
+
+    public SecretWatcher getSecretWatcher() {
+        return secretWatcher;
+    }
+
+    public ConfigMapWatcher getConfigMapWatcher() {
+        return configMapWatcher;
+    }
+
+    public ImageStreamWatcher getImageStreamWatcher() {
+        return imageStreamWatcher;
+    }
+
 }

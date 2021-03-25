@@ -15,43 +15,38 @@
  */
 package io.fabric8.jenkins.openshiftsync;
 
-import com.cloudbees.hudson.plugins.folder.Folder;
+import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.getJobFromBuildConfig;
+import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.initializeBuildConfigToJobMap;
+import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.removeJobWithBuildConfig;
+import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_BUILD_STATUS_FIELD;
+import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_LABELS_BUILD_CONFIG_NAME;
+import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getAuthenticatedOpenShiftClient;
+import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.isPipelineStrategyBuildConfig;
+import static java.util.logging.Level.SEVERE;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import hudson.BulkChange;
-import hudson.model.ItemGroup;
-import hudson.model.Job;
-import hudson.model.ParameterDefinition;
-import hudson.security.ACL;
-import hudson.triggers.SafeTimerTask;
-import hudson.util.XStream2;
-import io.fabric8.kubernetes.client.Watcher.Action;
-import io.fabric8.openshift.api.model.BuildConfig;
-import io.fabric8.openshift.api.model.BuildConfigList;
-import io.fabric8.openshift.api.model.BuildList;
-import jenkins.model.Jenkins;
-import jenkins.security.NotReallyRoleSensitiveCallable;
-import jenkins.util.Timer;
-
-import org.apache.tools.ant.filters.StringInputStream;
-import org.eclipse.jetty.util.ConcurrentHashSet;
-import org.jenkinsci.plugins.workflow.flow.FlowDefinition;
-import org.jenkinsci.plugins.workflow.job.WorkflowJob;
-
-import java.io.InputStream;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.getJobFromBuildConfig;
-import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.initializeBuildConfigToJobMap;
-import static io.fabric8.jenkins.openshiftsync.BuildConfigToJobMap.removeJobWithBuildConfig;
-import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_BUILD_STATUS_FIELD;
-import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_LABELS_BUILD_CONFIG_NAME;
-import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.*;
-import static java.util.logging.Level.SEVERE;
+import org.eclipse.jetty.util.ConcurrentHashSet;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import hudson.model.Job;
+import hudson.security.ACL;
+import hudson.triggers.SafeTimerTask;
+import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.fabric8.kubernetes.client.Watch;
+import io.fabric8.kubernetes.client.Watcher.Action;
+import io.fabric8.openshift.api.model.BuildConfig;
+import io.fabric8.openshift.api.model.BuildConfigList;
+import io.fabric8.openshift.api.model.BuildList;
+import io.fabric8.openshift.client.OpenShiftClient;
+import jenkins.model.Jenkins;
+import jenkins.security.NotReallyRoleSensitiveCallable;
+import jenkins.util.Timer;
 
 /**
  * Watches {@link BuildConfig} objects in OpenShift and for WorkflowJobs we
@@ -59,7 +54,61 @@ import static java.util.logging.Level.SEVERE;
  * configuration
  */
 public class BuildConfigWatcher extends BaseWatcher {
+
+    private static BuildConfigWatcherSafeTimerTask TIMER_TASK;
+
+    private final class BuildConfigWatcherSafeTimerTask extends WatchesBasedSafeTimerTask {
+        public BuildConfigWatcherSafeTimerTask() {
+            super();
+        }
+
+        @Override
+        public void doRun() {
+            OpenShiftUtils.initializeOpenShiftClient(GlobalPluginConfiguration.get().getServer());
+            if (!CredentialsUtils.hasCredentials()) {
+                logger.fine("No Openshift Token credential defined.");
+                return;
+            }
+            for (String ns : namespaces) {
+                BuildConfigList buildConfigs = null;
+                OpenShiftClient client = getAuthenticatedOpenShiftClient();
+                try {
+                    logger.fine("listing BuildConfigs resources");
+                    buildConfigs = client.buildConfigs().inNamespace(ns).list();
+                    onInitialBuildConfigs(buildConfigs);
+                    logger.fine("handled BuildConfigs resources");
+                } catch (KubernetesClientException e) {
+                    logger.log(SEVERE, "Failed to load BuildConfigs: " + e, e);
+                }
+                try {
+                    String rv = "0";
+                    if (buildConfigs == null) {
+                        logger.warning("Unable to get build config list; impacts resource version used for watch");
+                    } else {
+                        rv = buildConfigs.getMetadata().getResourceVersion();
+                    }
+                    Map<String, Watch> watches = Collections.synchronizedMap(getWatches());
+                    if (watches.get(ns) == null) {
+                        logger.info("Creating BuildConfig watch for ns " + ns + " and resourceVersion " + rv);
+                        BuildConfigWatcher w = BuildConfigWatcher.this;
+                        WatcherCallback<BuildConfig> watcher = new WatcherCallback<BuildConfig>(w, ns);
+                        Watch watch = client.buildConfigs().inNamespace(ns).withResourceVersion(rv).watch(watcher);
+                        addWatch(ns, watch);
+                    }
+                } catch (Exception e) {
+                    logger.log(SEVERE, "Failed to load BuildConfigs: " + e, e);
+                }
+            }
+            // poke the BuildWatcher builds with no BC list and see if we
+            // can create job
+            // runs for premature builds
+            BuildWatcher.flushBuildsWithNoBCList();
+        }
+    }
+
     private final Logger logger = Logger.getLogger(getClass().getName());
+
+    private final static Object lock = new Object();
 
     // for coordinating between ItemListener.onUpdate and onDeleted both
     // getting called when we delete a job; ID should be combo of namespace
@@ -90,45 +139,13 @@ public class BuildConfigWatcher extends BaseWatcher {
         return GlobalPluginConfiguration.get().getBuildConfigListInterval();
     }
 
-    public Runnable getStartTimerTask() {
-        return new SafeTimerTask() {
-            @Override
-            public void doRun() {
-                if (!CredentialsUtils.hasCredentials()) {
-                    logger.fine("No Openshift Token credential defined.");
-                    return;
-                }
-                for (String namespace : namespaces) {
-                    BuildConfigList buildConfigs = null;
-                    try {
-                        logger.fine("listing BuildConfigs resources");
-                        buildConfigs = getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(namespace).list();
-                        onInitialBuildConfigs(buildConfigs);
-                        logger.fine("handled BuildConfigs resources");
-                    } catch (Exception e) {
-                        logger.log(SEVERE, "Failed to load BuildConfigs: " + e, e);
-                    }
-                    try {
-                        String resourceVersion = "0";
-                        if (buildConfigs == null) {
-                            logger.warning("Unable to get build config list; impacts resource version used for watch");
-                        } else {
-                            resourceVersion = buildConfigs.getMetadata().getResourceVersion();
-                        }
-                        if (watches.get(namespace) == null) {
-                            logger.info("creating BuildConfig watch for namespace " + namespace + " and resource version " + resourceVersion);
-                            addWatch(namespace, getAuthenticatedOpenShiftClient().buildConfigs().inNamespace(namespace).withResourceVersion(resourceVersion).watch(new WatcherCallback<BuildConfig>(BuildConfigWatcher.this,namespace)));
-                        }
-                    } catch (Exception e) {
-                        logger.log(SEVERE, "Failed to load BuildConfigs: " + e, e);
-                    }
-                }
-                // poke the BuildWatcher builds with no BC list and see if we
-                // can create job
-                // runs for premature builds
-                BuildWatcher.flushBuildsWithNoBCList();
+    public WatchesBasedSafeTimerTask getStartTimerTask() {
+        if (BuildConfigWatcher.TIMER_TASK == null) {
+            synchronized (lock) {
+                BuildConfigWatcher.TIMER_TASK = new BuildConfigWatcherSafeTimerTask();
             }
-        };
+        }
+        return BuildConfigWatcher.TIMER_TASK;
     }
 
     public void start() {
@@ -139,8 +156,9 @@ public class BuildConfigWatcher extends BaseWatcher {
     }
 
     private void onInitialBuildConfigs(BuildConfigList buildConfigs) {
-        if (buildConfigs == null)
+        if (buildConfigs == null) {
             return;
+        }
         List<BuildConfig> items = buildConfigs.getItems();
         if (items != null) {
             for (BuildConfig buildConfig : items) {
@@ -154,6 +172,7 @@ public class BuildConfigWatcher extends BaseWatcher {
     }
 
     @SuppressFBWarnings("SF_SWITCH_NO_DEFAULT")
+    @SuppressWarnings("deprecation")
     public void eventReceived(Action action, BuildConfig buildConfig) {
         try {
             switch (action) {
@@ -167,10 +186,12 @@ public class BuildConfigWatcher extends BaseWatcher {
                 modifyEventToJenkinsJob(buildConfig);
                 break;
             case ERROR:
-                logger.warning("watch for buildconfig " + buildConfig.getMetadata().getName() + " received error event ");
+                logger.warning(
+                        "watch for buildconfig " + buildConfig.getMetadata().getName() + " received error event ");
                 break;
             default:
-                logger.warning("watch for buildconfig " + buildConfig.getMetadata().getName() + " received unknown event " + action);
+                logger.warning("watch for buildconfig " + buildConfig.getMetadata().getName()
+                        + " received unknown event " + action);
                 break;
             }
             // we employ impersonation here to insure we have "full access";
@@ -202,10 +223,15 @@ public class BuildConfigWatcher extends BaseWatcher {
                                     logger.fine("No Openshift Token credential defined.");
                                     return;
                                 }
-                                BuildList buildList = getAuthenticatedOpenShiftClient().builds().inNamespace(buildConfig.getMetadata().getNamespace()).withField(OPENSHIFT_BUILD_STATUS_FIELD, BuildPhases.NEW)
-                                        .withLabel(OPENSHIFT_LABELS_BUILD_CONFIG_NAME, buildConfig.getMetadata().getName()).list();
+                                BuildList buildList = getAuthenticatedOpenShiftClient().builds()
+                                        .inNamespace(buildConfig.getMetadata().getNamespace())
+                                        .withField(OPENSHIFT_BUILD_STATUS_FIELD, BuildPhases.NEW)
+                                        .withLabel(OPENSHIFT_LABELS_BUILD_CONFIG_NAME,
+                                                buildConfig.getMetadata().getName())
+                                        .list();
                                 if (buildList.getItems().size() > 0) {
-                                    logger.info("build backup query for " + buildConfig.getMetadata().getName() + " found new builds");
+                                    logger.info("build backup query for " + buildConfig.getMetadata().getName()
+                                            + " found new builds");
                                     BuildWatcher.onInitialBuilds(buildList);
                                 }
                             }
@@ -219,9 +245,10 @@ public class BuildConfigWatcher extends BaseWatcher {
             logger.log(Level.WARNING, "Caught: " + e, e);
         }
     }
+
     @Override
     public <T> void eventReceived(io.fabric8.kubernetes.client.Watcher.Action action, T resource) {
-        BuildConfig bc = (BuildConfig)resource;
+        BuildConfig bc = (BuildConfig) resource;
         eventReceived(action, bc);
     }
 
@@ -247,6 +274,7 @@ public class BuildConfigWatcher extends BaseWatcher {
     // innerDeleteEventToJenkinsJob is the actual delete logic at the heart of
     // deleteEventToJenkinsJob
     // that is either in a sync block or not based on the presence of a BC uid
+    @SuppressWarnings("deprecation")
     private void innerDeleteEventToJenkinsJob(final BuildConfig buildConfig) throws Exception {
         final Job job = getJobFromBuildConfig(buildConfig);
         if (job != null) {
@@ -257,12 +285,14 @@ public class BuildConfigWatcher extends BaseWatcher {
                     @Override
                     public Void call() throws Exception {
                         try {
-                            deleteInProgress(buildConfig.getMetadata().getNamespace() + buildConfig.getMetadata().getName());
+                            deleteInProgress(
+                                    buildConfig.getMetadata().getNamespace() + buildConfig.getMetadata().getName());
                             job.delete();
                         } finally {
                             removeJobWithBuildConfig(buildConfig);
                             Jenkins.getActiveInstance().rebuildDependencyGraphAsync();
-                            deleteCompleted(buildConfig.getMetadata().getNamespace() + buildConfig.getMetadata().getName());
+                            deleteCompleted(
+                                    buildConfig.getMetadata().getNamespace() + buildConfig.getMetadata().getName());
                         }
                         return null;
                     }

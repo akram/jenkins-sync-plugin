@@ -15,24 +15,85 @@
  */
 package io.fabric8.jenkins.openshiftsync;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import hudson.triggers.SafeTimerTask;
-import io.fabric8.kubernetes.api.model.ConfigMap;
-import io.fabric8.kubernetes.api.model.ConfigMapList;
-import io.fabric8.kubernetes.client.Watcher.Action;
-
-import org.csanchez.jenkins.plugins.kubernetes.PodTemplate;
-
-import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.Logger;
-
 import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getAuthenticatedOpenShiftClient;
+import static io.fabric8.jenkins.openshiftsync.PodTemplateUtils.CONFIG_MAP;
+import static io.fabric8.jenkins.openshiftsync.PodTemplateUtils.configMapContainsSlave;
+import static io.fabric8.jenkins.openshiftsync.PodTemplateUtils.podTemplatesFromConfigMap;
+import static io.fabric8.jenkins.openshiftsync.PodTemplateUtils.processSlavesForAddEvent;
+import static io.fabric8.jenkins.openshiftsync.PodTemplateUtils.processSlavesForDeleteEvent;
+import static io.fabric8.jenkins.openshiftsync.PodTemplateUtils.processSlavesForModifyEvent;
+import static io.fabric8.jenkins.openshiftsync.PodTemplateUtils.trackedPodTemplates;
 import static java.util.logging.Level.SEVERE;
 import static java.util.logging.Level.WARNING;
 
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
+
+import org.csanchez.jenkins.plugins.kubernetes.PodTemplate;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.fabric8.kubernetes.api.model.ConfigMap;
+import io.fabric8.kubernetes.api.model.ConfigMapList;
+import io.fabric8.kubernetes.client.Watch;
+import io.fabric8.kubernetes.client.Watcher.Action;
+import io.fabric8.kubernetes.client.dsl.internal.WatchConnectionManager;
+import io.fabric8.openshift.client.OpenShiftClient;
+
 public class ConfigMapWatcher extends BaseWatcher {
+    private static ConfigMapWatcherTimerTask TIMER_TASK;
+
+    private final class ConfigMapWatcherTimerTask extends WatchesBasedSafeTimerTask {
+
+        @Override
+        public void doRun() {
+            OpenShiftUtils.initializeOpenShiftClient(GlobalPluginConfiguration.get().getServer());
+            if (!CredentialsUtils.hasCredentials()) {
+                LOGGER.fine("No Openshift Token credential defined.");
+                return;
+            }
+            OpenShiftClient client = getAuthenticatedOpenShiftClient();
+            LOGGER.info("Using openshift client: " + client);
+            for (String ns : namespaces) {
+                ConfigMapList configMaps = null;
+                try {
+                    LOGGER.fine("listing ConfigMap resources");
+                    configMaps = client.configMaps().inNamespace(ns).list();
+                    onInitialConfigMaps(configMaps);
+                    LOGGER.fine("handled ConfigMap resources");
+                } catch (Exception e) {
+                    LOGGER.log(SEVERE, "Failed to load ConfigMaps: " + e, e);
+                }
+                try {
+                    String rv = "0";
+                    if (configMaps == null) {
+                        LOGGER.warning("Unable to get config map list; impacts resource version used for watch");
+                    } else {
+                        rv = configMaps.getMetadata().getResourceVersion();
+                    }
+                    Map<String, Watch> watches = Collections.synchronizedMap(getWatches());
+                    Watch watch = watches.get(ns);
+                    if (watch == null) {
+                        LOGGER.info("creating ConfigMap watch for namespace " + ns + " and resource version " + rv);
+                        ConfigMapWatcher w = ConfigMapWatcher.this;
+                        WatcherCallback<ConfigMap> watcher = new WatcherCallback<ConfigMap>(w, ns);
+                        addWatch(ns, client.configMaps().inNamespace(ns).withResourceVersion(rv).watch(watcher));
+                    } else {
+                        LOGGER.info("Already existent configMap watch for ns: " + ns + ": watch" + watch);
+                        WatchConnectionManager w = (WatchConnectionManager) watch;
+
+                    }
+                } catch (Exception e) {
+                    LOGGER.log(SEVERE, "Failed to load ConfigMaps: " + e, e);
+                }
+            }
+        }
+    }
+
     private final Logger LOGGER = Logger.getLogger(getClass().getName());
+    private final static Object lock = new Object();
 
     @SuppressFBWarnings("EI_EXPOSE_REP2")
     public ConfigMapWatcher(String[] namespaces) {
@@ -44,49 +105,15 @@ public class ConfigMapWatcher extends BaseWatcher {
         return GlobalPluginConfiguration.get().getConfigMapListInterval();
     }
 
-    public Runnable getStartTimerTask() {
-        return new SafeTimerTask() {
-            @Override
-            public void doRun() {
-                if (!CredentialsUtils.hasCredentials()) {
-                    LOGGER.fine("No Openshift Token credential defined.");
-                    return;
-                }
-                for (String namespace : namespaces) {
-                    ConfigMapList configMaps = null;
-                    try {
-                        LOGGER.fine("listing ConfigMap resources");
-                        configMaps = getAuthenticatedOpenShiftClient()
-                                .configMaps().inNamespace(namespace).list();
-                        onInitialConfigMaps(configMaps);
-                        LOGGER.fine("handled ConfigMap resources");
-                    } catch (Exception e) {
-                        LOGGER.log(SEVERE, "Failed to load ConfigMaps: " + e, e);
-                    }
-                    try {
-                        String resourceVersion = "0";
-                        if (configMaps == null) {
-                            LOGGER.warning("Unable to get config map list; impacts resource version used for watch");
-                        } else {
-                            resourceVersion = configMaps.getMetadata().getResourceVersion();
-                        }
-                        if (watches.get(namespace) == null) {
-                            LOGGER.info("creating ConfigMap watch for namespace "
-                                    + namespace
-                                    + " and resource version "
-                                    + resourceVersion);
-                            addWatch(namespace,
-                                    getAuthenticatedOpenShiftClient()
-                                    .configMaps()
-                                    .inNamespace(namespace)
-                                    .withResourceVersion(resourceVersion).watch(new WatcherCallback<ConfigMap>(ConfigMapWatcher.this,namespace)));
-                        }
-                    } catch (Exception e) {
-                        LOGGER.log(SEVERE, "Failed to load ConfigMaps: " + e, e);
-                    }
-                }
+    public WatchesBasedSafeTimerTask getStartTimerTask() {
+        if (ConfigMapWatcher.TIMER_TASK == null) {
+            synchronized (lock) {
+                ConfigMapWatcher.TIMER_TASK = new ConfigMapWatcherTimerTask();
             }
-        };
+        }
+        String clazz = getClass().getName();
+        LOGGER.info("Timertask for " + clazz + "is " + TIMER_TASK);
+        return ConfigMapWatcher.TIMER_TASK;
     }
 
     public void start() {
@@ -97,63 +124,64 @@ public class ConfigMapWatcher extends BaseWatcher {
 
     public void eventReceived(Action action, ConfigMap configMap) {
         try {
-            List<PodTemplate> slavesFromCM = PodTemplateUtils.podTemplatesFromConfigMap(this, configMap);
-            boolean hasSlaves = slavesFromCM.size() > 0;
+            List<PodTemplate> agents = podTemplatesFromConfigMap(this, configMap);
+            boolean hasSlaves = agents.size() > 0;
             String uid = configMap.getMetadata().getUid();
-            String cmname = configMap.getMetadata().getName();
+            String name = configMap.getMetadata().getName();
+            String cmname = name;
             String namespace = configMap.getMetadata().getNamespace();
             switch (action) {
             case ADDED:
                 if (hasSlaves) {
-                    processSlavesForAddEvent(slavesFromCM, PodTemplateUtils.cmType, uid, cmname, namespace);
+                    processSlavesForAddEvent(this, agents, CONFIG_MAP, uid, cmname, namespace);
                 }
                 break;
             case MODIFIED:
-                processSlavesForModifyEvent(slavesFromCM, PodTemplateUtils.cmType, uid, cmname, namespace);
+                processSlavesForModifyEvent(this, agents, CONFIG_MAP, uid, cmname, namespace);
                 break;
             case DELETED:
-                this.processSlavesForDeleteEvent(slavesFromCM, PodTemplateUtils.cmType, uid, cmname, namespace);
+                processSlavesForDeleteEvent(this, agents, CONFIG_MAP, uid, cmname, namespace);
                 break;
             case ERROR:
-                LOGGER.warning("watch for configMap " + configMap.getMetadata().getName() + " received error event ");
+                LOGGER.warning("watch for configMap " + name + " received error event ");
                 break;
             default:
-                LOGGER.warning("watch for configMap " + configMap.getMetadata().getName() + " received unknown event " + action);
+                LOGGER.warning("watch for configMap " + name + " received unknown event " + action);
                 break;
             }
         } catch (Exception e) {
             LOGGER.log(WARNING, "Caught: " + e, e);
         }
     }
+
     @Override
     public <T> void eventReceived(io.fabric8.kubernetes.client.Watcher.Action action, T resource) {
-        ConfigMap cfgmap = (ConfigMap)resource;
+        ConfigMap cfgmap = (ConfigMap) resource;
         eventReceived(action, cfgmap);
     }
 
     private void onInitialConfigMaps(ConfigMapList configMaps) {
         if (configMaps == null)
             return;
-        if (PodTemplateUtils.trackedPodTemplates == null) {
-            PodTemplateUtils.trackedPodTemplates = new ConcurrentHashMap<>(configMaps.getItems().size());
+        if (trackedPodTemplates == null) {
+            trackedPodTemplates = new ConcurrentHashMap<>(configMaps.getItems().size());
         }
         List<ConfigMap> items = configMaps.getItems();
         if (items != null) {
             for (ConfigMap configMap : items) {
                 try {
-                    if (PodTemplateUtils.configMapContainsSlave(configMap) && !PodTemplateUtils.trackedPodTemplates.containsKey(configMap.getMetadata().getUid())) {
-                        List<PodTemplate> templates = PodTemplateUtils.podTemplatesFromConfigMap(this, configMap);
-                        PodTemplateUtils.trackedPodTemplates.put(configMap.getMetadata().getUid(), templates);
+                    String uid = configMap.getMetadata().getUid();
+                    if (configMapContainsSlave(configMap) && !trackedPodTemplates.containsKey(uid)) {
+                        List<PodTemplate> templates = podTemplatesFromConfigMap(this, configMap);
+                        trackedPodTemplates.put(uid, templates);
                         for (PodTemplate podTemplate : templates) {
-                          PodTemplateUtils.addPodTemplate(podTemplate);
+                            PodTemplateUtils.addPodTemplate(podTemplate);
                         }
                     }
                 } catch (Exception e) {
-                    LOGGER.log(SEVERE,
-                            "Failed to update ConfigMap PodTemplates", e);
+                    LOGGER.log(SEVERE, "Failed to update ConfigMap PodTemplates", e);
                 }
             }
         }
     }
-
 }

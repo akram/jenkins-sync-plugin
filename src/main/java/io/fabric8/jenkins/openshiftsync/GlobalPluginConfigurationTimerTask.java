@@ -41,25 +41,74 @@ public class GlobalPluginConfigurationTimerTask extends SafeTimerTask {
     }
 
     private void intializeAndStartWatchers() {
+        OpenShiftUtils.shutdownOpenShiftClient();
         String[] namespaces = globalPluginConfiguration.getNamespaces();
-        BuildConfigWatcher buildConfigWatcher = new BuildConfigWatcher(namespaces);
-        globalPluginConfiguration.setBuildConfigWatcher(buildConfigWatcher);
-        buildConfigWatcher.start();
+        initBuildConfigAndBuildWatcher(namespaces);
+        initConfigMapWatcher(namespaces);
+        initImageStreampWatcher(namespaces);
+        initSecretWatcher(namespaces);
+    }
 
-        BuildWatcher buildWatcher = new BuildWatcher(namespaces);
-        globalPluginConfiguration.setBuildWatcher(buildWatcher);
-        buildWatcher.start();
+    private void initSecretWatcher(String[] namespaces) {
+        SecretWatcher watcher = globalPluginConfiguration.getSecretWatcher();
+        if (watcher != null) {
+            watcher.stop();
+            globalPluginConfiguration.setSecretWatcher(null);
+        }
+        if (globalPluginConfiguration.isSyncSecrets()) {
+            watcher = new SecretWatcher(namespaces);
+            globalPluginConfiguration.setSecretWatcher(watcher);
+            watcher.start();
+        }
+    }
 
-        ConfigMapWatcher configMapWatcher = new ConfigMapWatcher(namespaces);
-        globalPluginConfiguration.setConfigMapWatcher(configMapWatcher);
-        configMapWatcher.start();
+    private void initImageStreampWatcher(String[] namespaces) {
+        ImageStreamWatcher watcher = globalPluginConfiguration.getImageStreamWatcher();
+        if (watcher != null) {
+            watcher.stop();
+            globalPluginConfiguration.setConfigMapWatcher(null);
+        }
+        if (globalPluginConfiguration.isSyncImageStreams()) {
+            watcher = new ImageStreamWatcher(namespaces);
+            globalPluginConfiguration.setImageStreamWatcher(watcher);
+            watcher.start();
+        }
+    }
 
-        ImageStreamWatcher imageStreamWatcher = new ImageStreamWatcher(namespaces);
-        globalPluginConfiguration.setImageStreamWatcher(imageStreamWatcher);
-        imageStreamWatcher.start();
+    private void initConfigMapWatcher(String[] namespaces) {
+        if (globalPluginConfiguration.isSyncConfigMaps()) {
+            ConfigMapWatcher watcher = globalPluginConfiguration.getConfigMapWatcher();
+            if (watcher != null) {
+                watcher.stop();
+                globalPluginConfiguration.setConfigMapWatcher(null);
+            }
+            watcher = new ConfigMapWatcher(namespaces);
+            globalPluginConfiguration.setConfigMapWatcher(watcher);
+            watcher.start();
+        }
+    }
 
-        SecretWatcher secretWatcher = new SecretWatcher(namespaces);
-        globalPluginConfiguration.setSecretWatcher(secretWatcher);
-        secretWatcher.start();
+    private void initBuildConfigAndBuildWatcher(String[] namespaces) {
+        BuildWatcher buildWatcher = globalPluginConfiguration.getBuildWatcher();
+        if (buildWatcher != null) {
+            buildWatcher.stop();
+            globalPluginConfiguration.setBuildWatcher(null);
+
+        }
+        BuildConfigWatcher buildConfigWatcher = globalPluginConfiguration.getBuildConfigWatcher();
+        if (buildConfigWatcher != null) {
+            buildConfigWatcher.stop();
+            globalPluginConfiguration.setBuildConfigWatcher(null);
+        }
+
+        if (globalPluginConfiguration.isSyncBuildConfigsAndBuilds()) {
+            buildConfigWatcher = new BuildConfigWatcher(namespaces);
+            globalPluginConfiguration.setBuildConfigWatcher(buildConfigWatcher);
+            buildConfigWatcher.start();
+
+            buildWatcher = new BuildWatcher(namespaces);
+            globalPluginConfiguration.setBuildWatcher(buildWatcher);
+            buildWatcher.start();
+        }
     }
 }
