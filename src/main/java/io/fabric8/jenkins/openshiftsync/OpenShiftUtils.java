@@ -44,6 +44,7 @@ import io.fabric8.openshift.api.model.RouteList;
 import io.fabric8.openshift.api.model.RouteSpec;
 import io.fabric8.openshift.client.DefaultOpenShiftClient;
 import io.fabric8.openshift.client.OpenShiftClient;
+import io.fabric8.openshift.client.OpenShiftConfig;
 import io.fabric8.openshift.client.OpenShiftConfigBuilder;
 import jenkins.model.Jenkins;
 
@@ -134,7 +135,7 @@ public class OpenShiftUtils {
         if (serverUrl != null && !serverUrl.isEmpty()) {
             configBuilder.withMasterUrl(serverUrl);
         }
-        Config config = configBuilder.build();
+        OpenShiftConfig config = configBuilder.build();
         config.setUserAgent("openshift-sync-plugin-"
                 + Jenkins.getInstance().getPluginManager()
                         .getPlugin("openshift-sync").getVersion() + "/fabric8-"

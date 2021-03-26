@@ -160,10 +160,22 @@
       <version>1.29.0</version>
     </dependency>
     <dependency>
+        <groupId>com.squareup.okhttp3</groupId>
+        <artifactId>okhttp</artifactId>
+        <version>3.12.12</version>
+        <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>io.fabric8</groupId>
       <artifactId>kubernetes-client</artifactId>
       <version>4.13.2</version>
-      <scope>compile</scope>
+      <scope>provided</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>com.squareup.okhttp3</groupId>
+          <artifactId>okhttp</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>
