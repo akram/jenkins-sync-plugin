@@ -15,17 +15,21 @@
  */
 package io.fabric8.jenkins.openshiftsync;
 
+import org.apache.commons.lang.builder.ReflectionToStringBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.Watcher;
 import io.fabric8.kubernetes.client.WatcherException;
 
 public class WatcherCallback<T> implements Watcher<T> {
-    
+
+    private final static Logger LOGGER = LoggerFactory.getLogger(WatcherCallback.class.getName());
     private final BaseWatcher watcher;
     private final String namespace;
 
-    public WatcherCallback(BaseWatcher w,
-            String n) {
+    public WatcherCallback(BaseWatcher w, String n) {
         watcher = w;
         namespace = n;
     }
@@ -35,13 +39,25 @@ public class WatcherCallback<T> implements Watcher<T> {
         watcher.eventReceived(action, resource);
     }
 
-    @Override
-    public void onClose(KubernetesClientException cause) {
+    /**
+     * Invoked when the watcher is gracefully closed.
+     */
+    public void onClose() {
+        LOGGER.info("WatcherCallback onClosed() invoked: closing watcher: " + ReflectionToStringBuilder.toString(watcher));
+        WatcherException cause = new WatcherException("Received close from manager.");
         watcher.onClose(cause, namespace);
+        LOGGER.info("WatcherCallback invoked: closed watcher: " + ReflectionToStringBuilder.toString(watcher));
     }
 
     @Override
-    public void onClose(WatcherException cause) {
+    public void onClose(KubernetesClientException cause) {
+        LOGGER.info("WatcherCallback: onClosed invoked: closing watcher: " + ReflectionToStringBuilder.toString(watcher));
         watcher.onClose(cause, namespace);
     }
+
+//    @Override
+//    public void onClose(WatcherException cause) {
+//        LoggerFactory.getLogger(WatcherCallback.class).info("WatcherClalback invoked: watcher closed");
+//        watcher.onClose(cause, namespace);
+//    }
 }

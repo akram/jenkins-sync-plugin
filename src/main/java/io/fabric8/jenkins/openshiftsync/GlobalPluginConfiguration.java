@@ -22,6 +22,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.logging.Level.SEVERE;
 import static jenkins.model.Jenkins.ADMINISTER;
 
+import java.util.Arrays;
 import java.util.logging.Logger;
 
 import org.apache.commons.lang.StringUtils;
@@ -42,7 +43,7 @@ import net.sf.json.JSONObject;
 @Extension
 public class GlobalPluginConfiguration extends GlobalConfiguration {
 
-    private static final Logger logger = Logger.getLogger(GlobalPluginConfiguration.class.getName());
+    private static final Logger LOGGER = Logger.getLogger(GlobalPluginConfiguration.class.getName());
 
     private boolean enabled = true;
     private boolean foldersEnabled = true;
@@ -64,11 +65,14 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
     private transient ConfigMapWatcher configMapWatcher;
     private transient ImageStreamWatcher imageStreamWatcher;
 
+    private static transient GlobalPluginConfigurationTimerTask TASK;
+
     @DataBoundConstructor
     public GlobalPluginConfiguration(boolean enable, String server, String namespace, boolean foldersEnabled,
             String credentialsId, String jobNamePattern, String skipOrganizationPrefix, String skipBranchSuffix,
             int buildListInterval, int buildConfigListInterval, int configMapListInterval, int secretListInterval,
             int imageStreamListInterval) {
+        LOGGER.info("OpenShift Sync Plugin constructor called with namespace arg: " + namespace);
         this.enabled = enable;
         this.server = server;
         this.namespaces = StringUtils.isBlank(namespace) ? null : namespace.split(" ");
@@ -156,6 +160,8 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
     }
 
     public void setNamespace(String namespace) {
+        String message = "Setting new namespace value in GlobalPluginConfiguration for OpenShiftSyncPlugin to: ";
+        LOGGER.info(message + namespace);
         this.namespaces = StringUtils.isBlank(namespace) ? null : namespace.split(" ");
     }
 
@@ -240,27 +246,76 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
     }
 
     void setBuildWatcher(BuildWatcher buildWatcher) {
+        closeWatcher(this.buildWatcher);
         this.buildWatcher = buildWatcher;
     }
 
     void setBuildConfigWatcher(BuildConfigWatcher buildConfigWatcher) {
+        closeWatcher(this.buildConfigWatcher);
         this.buildConfigWatcher = buildConfigWatcher;
     }
 
     void setSecretWatcher(SecretWatcher secretWatcher) {
+        closeWatcher(this.secretWatcher);
         this.secretWatcher = secretWatcher;
     }
 
     void setConfigMapWatcher(ConfigMapWatcher configMapWatcher) {
+        closeWatcher(this.configMapWatcher);
         this.configMapWatcher = configMapWatcher;
     }
 
     void setImageStreamWatcher(ImageStreamWatcher imageStreamWatcher) {
+        closeWatcher(this.imageStreamWatcher);
         this.imageStreamWatcher = imageStreamWatcher;
     }
 
+    private void closeWatcher(BaseWatcher watcher) {
+//        if (watcher != null) {
+//            String className = watcher.getClass().getSimpleName();
+//            String message = "BaseWatcher " + className + " replacement";
+////            WatcherException we = new WatcherException(message);
+////            KubernetesClientException ke = new KubernetesClientException(message);
+////            for (String ns : watcher.namespaces) {
+////                watcher.onClose(we, ns);
+////                watcher.onClose(ke, ns);
+////            }
+//            logger.info(message);
+//            watcher.stop();
+//        }
+    }
+
+    public BuildWatcher getBuildWatcher() {
+        return buildWatcher;
+    }
+
+    public BuildConfigWatcher getBuildConfigWatcher() {
+        return buildConfigWatcher;
+    }
+
+    public SecretWatcher getSecretWatcher() {
+        return secretWatcher;
+    }
+
+    public ConfigMapWatcher getConfigMapWatcher() {
+        return configMapWatcher;
+    }
+
+    public ImageStreamWatcher getImageStreamWatcher() {
+        return imageStreamWatcher;
+    }
+
     private synchronized void configChange() {
-        logger.info("OpenShift Sync Plugin processing a newly supplied configuration");
+        LOGGER.info("OpenShift Sync Plugin processing a newly supplied configuration");
+        LOGGER.info("Supplied namepsaces to watch: " + Arrays.toString(namespaces));
+
+        if (TASK != null) {
+            LOGGER.info("Cancelling previously created task: " + TASK);
+            TASK.cancel();
+            LOGGER.info("Task cancelled:  " + TASK);
+            TASK = null;
+        }
+
         if (this.buildConfigWatcher != null) {
             this.buildConfigWatcher.stop();
         }
@@ -284,17 +339,18 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
         OpenShiftUtils.shutdownOpenShiftClient();
 
         if (!this.enabled) {
-            logger.info("OpenShift Sync Plugin has been disabled");
+            LOGGER.info("OpenShift Sync Plugin has been disabled");
             return;
         }
         try {
             OpenShiftUtils.initializeOpenShiftClient(this.server);
             this.namespaces = getNamespaceOrUseDefault(this.namespaces, getOpenShiftClient());
-            Runnable task = new GlobalPluginConfigurationTimerTask(this);
-            Timer.get().schedule(task, 1, SECONDS); // lets give jenkins a while to get started ;)
+            TASK = new GlobalPluginConfigurationTimerTask(this);
+            LOGGER.info("Creating a new GlobalPluginConfigurationTimerTask: " + TASK);
+            Timer.get().schedule(TASK, 1, SECONDS); // lets give jenkins a while to get started ;)
         } catch (KubernetesClientException e) {
             Throwable exceptionOrCause = (e.getCause() != null) ? e.getCause() : e;
-            logger.log(SEVERE, "Failed to configure OpenShift Jenkins Sync Plugin: " + exceptionOrCause);
+            LOGGER.log(SEVERE, "Failed to configure OpenShift Jenkins Sync Plugin: " + exceptionOrCause);
         }
     }
 }

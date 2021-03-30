@@ -16,22 +16,23 @@
 package io.fabric8.jenkins.openshiftsync;
 
 import static java.net.HttpURLConnection.HTTP_GONE;
-
-import io.fabric8.kubernetes.client.KubernetesClientException;
-import io.fabric8.kubernetes.client.Watch;
-import io.fabric8.kubernetes.client.WatcherException;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
+import org.apache.commons.lang.builder.ReflectionToStringBuilder;
 import org.csanchez.jenkins.plugins.kubernetes.PodTemplate;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.fabric8.kubernetes.client.Watch;
+import io.fabric8.kubernetes.client.WatcherException;
 import jenkins.util.Timer;
 
 public abstract class BaseWatcher {
@@ -39,17 +40,15 @@ public abstract class BaseWatcher {
 
     protected ScheduledFuture relister;
     protected final String[] namespaces;
-    protected ConcurrentHashMap<String, Watch> watches;
-    private final String PT_NAME_CLAIMED = "The event for %s | %s | %s that attempts to add the pod template %s was ignored because a %s previously created a pod template with the same name";
-    private final String PT_NOT_OWNED = "The event for %s | %s | %s that no longer includes the pod template %s was ignored because the type %s was associated with that pod template";
 
     @SuppressFBWarnings("EI_EXPOSE_REP2")
     public BaseWatcher(String[] namespaces) {
         this.namespaces = namespaces;
-        watches = new ConcurrentHashMap<>();
     }
 
     public abstract Runnable getStartTimerTask();
+
+    public abstract ConcurrentHashMap<String, Watch> getWatches();
 
     public abstract int getListIntervalInSeconds();
 
@@ -61,35 +60,43 @@ public abstract class BaseWatcher {
         // io.fabric8.jenkins.openshiftsync.GlobalPluginConfiguration to support
         // a circular dependency, but it is not an interface.
         Runnable task = getStartTimerTask();
-        relister = Timer.get().scheduleAtFixedRate(task, 100, // still do the
-                                                              // first run 100
-                                                              // milliseconds in
-                getListIntervalInSeconds() * 1000,
-                TimeUnit.MILLISECONDS);
-
+        GlobalPluginConfiguration.get().setSecretWatcher(null);
+        // still do the first run 100 milliseconds in
+        relister = Timer.get().scheduleAtFixedRate(task, 100, getListIntervalInSeconds() * 1000, MILLISECONDS);
     }
 
     public void stop() {
+        LOGGER.info("Stopping watcher for type " + this.getClass().getName() + " closed: " + this);
+        LOGGER.info("Relister thread is: " + relister);
         if (relister != null && !relister.isDone()) {
             relister.cancel(true);
+            LOGGER.info("Relister cancelled? : " + relister.isCancelled());
+            LOGGER.info("Relister done? : " + relister.isDone());
             relister = null;
         }
-
-        for (Map.Entry<String, Watch> entry : watches.entrySet()) {
-            entry.getValue().close();
-            watches.remove(entry.getKey());
+        LOGGER.info("Now closing all the getWatches()...");
+        for (Map.Entry<String, Watch> entry : getWatches().entrySet()) {
+            Watch value = entry.getValue();
+            Watch watch = value;
+            LOGGER.info("Closing watch: " + toString(watch));
+            watch.close();
+            getWatches().remove(entry.getKey());
         }
+        //start();
+    }
+
+    public String toString(Watch watch) {
+        return ReflectionToStringBuilder.toString(watch);
     }
 
     public void onClose(WatcherException e, String namespace) {
-        //scans of fabric client confirm this call be called with null
-        //we do not want to totally ignore this, as the closing of the
-        //watch can effect responsiveness
-        LOGGER.info("Watch for type " + this.getClass().getName() + " closed for one of the following namespaces: " + watches.keySet().toString());
+        // scans of fabric client confirm this call be called with null
+        // we do not want to totally ignore this, as the closing of the
+        // watch can effect responsiveness
+        LOGGER.info("Watch for type " + this.getClass().getName() + " closed for namespace: " + namespace);
         if (e != null) {
-            LOGGER.warning(e.toString());
-
-            if (e.isHttpGone()) {
+            LOGGER.warning("Maybe HTTP_GONE: " + e.toString());
+            if (isHttpGone(e)) {
                 LOGGER.info("Got HTTP_GONE: " + e + " while watching namespace: " + namespace);
                 stop();
                 start();
@@ -99,18 +106,25 @@ public abstract class BaseWatcher {
         // to attempt to re-establish the watch the next time they attempt
         // to list; should shield from rapid/repeated close/reopen cycles
         // doing it in this fashion
-        watches.remove(namespace);
+        Watch remove = getWatches().remove(namespace);
+        if (remove != null) {
+            remove.close();
+        }
+        // start();
+    }
+
+    private boolean isHttpGone(WatcherException e) {
+        return e.isHttpGone();
     }
 
     public void onClose(KubernetesClientException e, String namespace) {
-        //scans of fabric client confirm this call be called with null
-        //we do not want to totally ignore this, as the closing of the
-        //watch can effect responsiveness
-        LOGGER.info("Watch for type " + this.getClass().getName() + " closed for one of the following namespaces: " + watches.keySet().toString());
+        // scans of fabric client confirm this call be called with null
+        // we do not want to totally ignore this, as the closing of the
+        // watch can effect responsiveness
+        LOGGER.info("Watch for type " + this.getClass().getName() + " closed for namespace: " + namespace);
         if (e != null) {
-            LOGGER.warning(e.toString());
-
-            if (e.getStatus() != null && e.getStatus().getCode() == HTTP_GONE) {
+            LOGGER.warning("Maybe HTTP_GONE: " + e.toString());
+            if (isHttpGone(e)) {
                 stop();
                 start();
             }
@@ -119,26 +133,36 @@ public abstract class BaseWatcher {
         // to attempt to re-establish the watch the next time they attempt
         // to list; should shield from rapid/repeated close/reopen cycles
         // doing it in this fashion
-        watches.remove(namespace);
-    }
-
-    public void addWatch(String key, Watch desiredWatch) {
-        Watch watch = watches.putIfAbsent(key, desiredWatch);
-        if (watch != null) {
-          watch.close();
+        getWatches().remove(namespace);
+        Watch remove = getWatches().remove(namespace);
+        if (remove != null) {
+            remove.close();
         }
     }
 
-    protected void processSlavesForAddEvent(List<PodTemplate> slaves, String type, String uid, String apiObjName, String namespace) {
-      LOGGER.info("Adding PodTemplate(s) for ");
-      List<PodTemplate> finalSlaveList = new ArrayList<PodTemplate>();
+    private boolean isHttpGone(KubernetesClientException e) {
+        return e.getStatus() != null && e.getStatus().getCode() == HTTP_GONE;
+    }
+
+    public void addWatch(String key, Watch desiredWatch) {
+        Watch watch = getWatches().putIfAbsent(key, desiredWatch);
+        if (watch != null) {
+            watch.close();
+        }
+    }
+
+    protected void processSlavesForAddEvent(List<PodTemplate> slaves, String type, String uid, String apiObjName,
+            String namespace) {
+        LOGGER.info("Adding PodTemplate(s) for ");
+        List<PodTemplate> finalSlaveList = new ArrayList<PodTemplate>();
         for (PodTemplate podTemplate : slaves) {
-          PodTemplateUtils.addPodTemplate(this, type, apiObjName, namespace, finalSlaveList, podTemplate);
+            PodTemplateUtils.addPodTemplate(this, type, apiObjName, namespace, finalSlaveList, podTemplate);
         }
         PodTemplateUtils.updateTrackedPodTemplatesMap(uid, finalSlaveList);
     }
 
-    protected void processSlavesForModifyEvent(List<PodTemplate> slaves, String type, String uid, String apiObjName, String namespace) {
+    protected void processSlavesForModifyEvent(List<PodTemplate> slaves, String type, String uid, String apiObjName,
+            String namespace) {
         LOGGER.info("Modifying PodTemplates");
         boolean alreadyTracked = PodTemplateUtils.trackedPodTemplates.containsKey(uid);
         boolean hasSlaves = slaves.size() > 0; // Configmap has podTemplates
@@ -154,14 +178,15 @@ public abstract class BaseWatcher {
                 // if they are, add them to or remove them from trackedPodTemplates
                 List<PodTemplate> podTemplatesToTrack = new ArrayList<PodTemplate>();
                 PodTemplateUtils.purgeTemplates(this, type, uid, apiObjName, namespace);
-                for(PodTemplate pt: slaves){
-                    podTemplatesToTrack = PodTemplateUtils.onlyTrackPodTemplate(this, type,apiObjName,namespace,podTemplatesToTrack, pt);
+                for (PodTemplate pt : slaves) {
+                    podTemplatesToTrack = PodTemplateUtils.onlyTrackPodTemplate(this, type, apiObjName, namespace,
+                            podTemplatesToTrack, pt);
                 }
                 PodTemplateUtils.updateTrackedPodTemplatesMap(uid, podTemplatesToTrack);
                 for (PodTemplate podTemplate : podTemplatesToTrack) {
-                      // still do put here in case this is a new item from the last
-                      // update on this ConfigMap/ImageStream
-                      PodTemplateUtils.addPodTemplate(this, type,null,null,null, podTemplate);
+                    // still do put here in case this is a new item from the last
+                    // update on this ConfigMap/ImageStream
+                    PodTemplateUtils.addPodTemplate(this, type, null, null, null, podTemplate);
                 }
             } else {
                 // The user modified the configMap to no longer be a
@@ -172,17 +197,32 @@ public abstract class BaseWatcher {
             if (hasSlaves) {
                 List<PodTemplate> finalSlaveList = new ArrayList<PodTemplate>();
                 for (PodTemplate podTemplate : slaves) {
-                  // The user modified the api obj to be a jenkins-slave
-                  PodTemplateUtils.addPodTemplate(this, type, apiObjName, namespace, finalSlaveList, podTemplate);
+                    // The user modified the api obj to be a jenkins-slave
+                    PodTemplateUtils.addPodTemplate(this, type, apiObjName, namespace, finalSlaveList, podTemplate);
                 }
                 PodTemplateUtils.updateTrackedPodTemplatesMap(uid, finalSlaveList);
             }
         }
     }
 
-    protected void processSlavesForDeleteEvent(List<PodTemplate> slaves, String type, String uid, String apiObjName, String namespace) {
+    protected void processSlavesForDeleteEvent(List<PodTemplate> slaves, String type, String uid, String apiObjName,
+            String namespace) {
         if (PodTemplateUtils.trackedPodTemplates.containsKey(uid)) {
             PodTemplateUtils.purgeTemplates(this, type, uid, apiObjName, namespace);
         }
     }
+
+    @Override
+    public String toString() {
+        StringBuilder builder = new StringBuilder();
+        builder.append("Watcher of type: ");
+        builder.append(getClass().getName());
+        builder.append(", [relister=");
+        builder.append(relister);
+        builder.append(", namespaces=");
+        builder.append(Arrays.toString(namespaces));
+        builder.append("]");
+        return builder.toString();
+    }
+
 }

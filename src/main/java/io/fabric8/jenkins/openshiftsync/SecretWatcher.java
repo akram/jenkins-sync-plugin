@@ -15,20 +15,24 @@
  */
 package io.fabric8.jenkins.openshiftsync;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import hudson.triggers.SafeTimerTask;
-import io.fabric8.kubernetes.api.model.ObjectMeta;
-import io.fabric8.kubernetes.api.model.Secret;
-import io.fabric8.kubernetes.api.model.SecretList;
-import io.fabric8.kubernetes.client.Watcher.Action;
+import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_LABELS_SECRET_CREDENTIAL_SYNC;
+import static io.fabric8.jenkins.openshiftsync.Constants.VALUE_SECRET_SYNC;
+import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getAuthenticatedOpenShiftClient;
+import static java.util.logging.Level.SEVERE;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getAuthenticatedOpenShiftClient;
-import static java.util.logging.Level.SEVERE;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import hudson.triggers.SafeTimerTask;
+import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.api.model.Secret;
+import io.fabric8.kubernetes.api.model.SecretList;
+import io.fabric8.kubernetes.client.Watch;
+import io.fabric8.kubernetes.client.Watcher.Action;
 
 /**
  * Watches {@link Secret} objects in Kubernetes and syncs then to Credentials in
@@ -36,7 +40,12 @@ import static java.util.logging.Level.SEVERE;
  */
 public class SecretWatcher extends BaseWatcher {
     private ConcurrentHashMap<String, String> trackedSecrets;
-    private final Logger logger = Logger.getLogger(getClass().getName());
+    private final static Logger LOGGER = Logger.getLogger(SecretWatcher.class.getName());
+    private final static ConcurrentHashMap<String, Watch> watches = new ConcurrentHashMap<>();
+
+    public ConcurrentHashMap<String, Watch> getWatches() {
+        return watches;
+    }
 
     @SuppressFBWarnings("EI_EXPOSE_REP2")
     public SecretWatcher(String[] namespaces) {
@@ -55,57 +64,56 @@ public class SecretWatcher extends BaseWatcher {
             @Override
             public void doRun() {
                 if (!CredentialsUtils.hasCredentials()) {
-                    logger.fine("No Openshift Token credential defined.");
+                    LOGGER.fine("No Openshift Token credential defined.");
                     return;
                 }
                 for (String namespace : namespaces) {
                     SecretList secrets = null;
                     try {
-                        logger.fine("listing Secrets resources");
-                        secrets = getAuthenticatedOpenShiftClient().secrets()
-                                .inNamespace(namespace)
-                                .withLabel(Constants.OPENSHIFT_LABELS_SECRET_CREDENTIAL_SYNC, Constants.VALUE_SECRET_SYNC).list();
+                        LOGGER.fine("listing Secrets resources");
+                        secrets = getAuthenticatedOpenShiftClient().secrets().inNamespace(namespace).withLabel(
+                                OPENSHIFT_LABELS_SECRET_CREDENTIAL_SYNC, VALUE_SECRET_SYNC).list();
                         onInitialSecrets(secrets);
-                        logger.fine("handled Secrets resources");
+                        LOGGER.fine("handled Secrets resources");
                     } catch (Exception e) {
-                        logger.log(SEVERE, "Failed to load Secrets: " + e, e);
+                        LOGGER.log(SEVERE, "Failed to load Secrets: " + e, e);
                     }
                     try {
                         String resourceVersion = "0";
                         if (secrets == null) {
-                            logger.warning("Unable to get secret list; impacts resource version used for watch");
+                            LOGGER.warning("Unable to get secret list; impacts resource version used for watch");
                         } else {
-                            resourceVersion = secrets.getMetadata()
-                                    .getResourceVersion();
+                            resourceVersion = secrets.getMetadata().getResourceVersion();
                         }
                         if (watches.get(namespace) == null) {
-                            logger.info("creating Secret watch for namespace "
-                                    + namespace + " and resource version"
-                                    + resourceVersion);
-                            addWatch(namespace,
-                                    getAuthenticatedOpenShiftClient()
-                                    .secrets()
-                                    .inNamespace(namespace)
-                                    .withLabel(Constants.OPENSHIFT_LABELS_SECRET_CREDENTIAL_SYNC,
-                                            Constants.VALUE_SECRET_SYNC)
-                                            .withResourceVersion(
-                                                    resourceVersion)
-                                                    .watch(new WatcherCallback<Secret>(SecretWatcher.this,
-                                                            namespace)));
+                            synchronized (watches) {
+                                if (watches.get(namespace) == null) {
+                                    LOGGER.info("creating Secret watch for namespace " + namespace
+                                            + " and resource version" + resourceVersion);
+                                    Watch watch = getAuthenticatedOpenShiftClient().secrets().inNamespace(namespace)
+                                            .withLabel(Constants.OPENSHIFT_LABELS_SECRET_CREDENTIAL_SYNC,
+                                                    Constants.VALUE_SECRET_SYNC)
+                                            .withResourceVersion(resourceVersion)
+                                            .watch(new WatcherCallback<Secret>(SecretWatcher.this, namespace));
+                                    addWatch(namespace, watch);
+                                }
+                            }
                         }
                     } catch (Exception e) {
-                        logger.log(SEVERE, "Failed to load Secrets: " + e, e);
+                        LOGGER.log(SEVERE, "Failed to load Secrets: " + e, e);
                     }
                 }
 
             }
         };
+
     }
 
     public void start() {
         // lets process the initial state
         super.start();
-        logger.info("Now handling startup secrets!!");
+        LOGGER.info("Now handling startup secrets!!");
+        LOGGER.info("Watched namespaces: " + Arrays.toString(namespaces));
     }
 
     private void onInitialSecrets(SecretList secrets) {
@@ -119,11 +127,10 @@ public class SecretWatcher extends BaseWatcher {
                 try {
                     if (validSecret(secret) && shouldProcessSecret(secret)) {
                         upsertCredential(secret);
-                        trackedSecrets.put(secret.getMetadata().getUid(),
-                                secret.getMetadata().getResourceVersion());
+                        trackedSecrets.put(secret.getMetadata().getUid(), secret.getMetadata().getResourceVersion());
                     }
                 } catch (Exception e) {
-                    logger.log(SEVERE, "Failed to update job", e);
+                    LOGGER.log(SEVERE, "Failed to update job", e);
                 }
             }
         }
@@ -143,83 +150,85 @@ public class SecretWatcher extends BaseWatcher {
                 modifyCredential(secret);
                 break;
             case ERROR:
-                logger.warning("watch for secret " + secret.getMetadata().getName() + " received error event ");
+                LOGGER.warning("watch for secret " + secret.getMetadata().getName() + " received error event ");
                 break;
             default:
-                logger.warning("watch for secret " + secret.getMetadata().getName() + " received unknown event " + action);
+                LOGGER.warning(
+                        "watch for secret " + secret.getMetadata().getName() + " received unknown event " + action);
                 break;
             }
         } catch (Exception e) {
-            logger.log(Level.WARNING, "Caught: " + e, e);
+            LOGGER.log(Level.WARNING, "Caught: " + e, e);
         }
     }
+
     @Override
     public <T> void eventReceived(io.fabric8.kubernetes.client.Watcher.Action action, T resource) {
-        Secret secret = (Secret)resource;
+        Secret secret = (Secret) resource;
         eventReceived(action, secret);
     }
 
     private void upsertCredential(final Secret secret) throws Exception {
-      if (secret != null) {
-        ObjectMeta metadata = secret.getMetadata();
-        if (metadata != null) {
-          logger.info("Upserting Secret with Uid " + metadata.getUid() + " with Name " + metadata.getName());
-          if (validSecret(secret)) {
-            CredentialsUtils.upsertCredential(secret);
-            trackedSecrets.put(metadata.getUid(), metadata.getResourceVersion());
-          }
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                LOGGER.info("Upserting Secret with Uid " + metadata.getUid() + " with Name " + metadata.getName());
+                if (validSecret(secret)) {
+                    CredentialsUtils.upsertCredential(secret);
+                    trackedSecrets.put(metadata.getUid(), metadata.getResourceVersion());
+                }
+            }
         }
-      }
     }
 
     private void modifyCredential(Secret secret) throws Exception {
-      if (secret != null) {
-        ObjectMeta metadata = secret.getMetadata();
-        if (metadata != null) {
-          logger.info("Modifying Secret with Uid " + metadata.getUid() + " with Name " + metadata.getName());
-          if (validSecret(secret) && shouldProcessSecret(secret)) {
-            CredentialsUtils.upsertCredential(secret);
-            trackedSecrets.put(metadata.getUid(), metadata.getResourceVersion());
-          }
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                LOGGER.info("Modifying Secret with Uid " + metadata.getUid() + " with Name " + metadata.getName());
+                if (validSecret(secret) && shouldProcessSecret(secret)) {
+                    CredentialsUtils.upsertCredential(secret);
+                    trackedSecrets.put(metadata.getUid(), metadata.getResourceVersion());
+                }
+            }
         }
-      }
     }
 
     private boolean validSecret(Secret secret) {
-      if (secret !=null){
-        ObjectMeta metadata = secret.getMetadata();
-        if (metadata != null) {
-          String name = metadata.getName();
-          String namespace = metadata.getNamespace();
-          logger.info("Validating Secret with Uid "+ metadata.getUid() + " with Name " + name);
-          return name != null && !name.isEmpty() && namespace != null && !namespace.isEmpty();
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                String name = metadata.getName();
+                String namespace = metadata.getNamespace();
+                LOGGER.info("Validating Secret with Uid " + metadata.getUid() + " with Name " + name);
+                return name != null && !name.isEmpty() && namespace != null && !namespace.isEmpty();
+            }
         }
-      }
         return false;
     }
 
     private boolean shouldProcessSecret(Secret secret) {
-      if (secret !=null){
-        ObjectMeta metadata = secret.getMetadata();
-        if (metadata != null) {
-          String uid = metadata.getUid();
-          String rv = metadata.getResourceVersion();
-          String savedRV = trackedSecrets.get(uid);
-          if (savedRV == null || !savedRV.equals(rv)) {
-            return true;
-          }
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                String uid = metadata.getUid();
+                String rv = metadata.getResourceVersion();
+                String savedRV = trackedSecrets.get(uid);
+                if (savedRV == null || !savedRV.equals(rv)) {
+                    return true;
+                }
+            }
         }
-      }
-      return false;
+        return false;
     }
 
     private void deleteCredential(final Secret secret) throws Exception {
-      if (secret != null){
-        ObjectMeta metadata = secret.getMetadata();
-        if (metadata != null) {
-          trackedSecrets.remove(metadata.getUid());
-          CredentialsUtils.deleteCredential(secret);
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                trackedSecrets.remove(metadata.getUid());
+                CredentialsUtils.deleteCredential(secret);
+            }
         }
-      }
     }
 }

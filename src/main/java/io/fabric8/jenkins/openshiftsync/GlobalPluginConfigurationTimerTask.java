@@ -18,6 +18,7 @@ public class GlobalPluginConfigurationTimerTask extends SafeTimerTask {
         this.globalPluginConfiguration = globalPluginConfiguration;
     }
 
+    @SuppressWarnings("deprecation")
     @Override
     protected void doRun() throws Exception {
         logger.info("Confirming Jenkins is started");
@@ -35,12 +36,9 @@ public class GlobalPluginConfigurationTimerTask extends SafeTimerTask {
                 Thread.sleep(500);
             } catch (InterruptedException e) {
                 // ignore
+                logger.warning("GlobalPluginConfigurationTimerTask received InterruptedException: " + e);
             }
         }
-        intializeAndStartWatchers();
-    }
-
-    private void intializeAndStartWatchers() {
         String[] namespaces = globalPluginConfiguration.getNamespaces();
         BuildConfigWatcher buildConfigWatcher = new BuildConfigWatcher(namespaces);
         globalPluginConfiguration.setBuildConfigWatcher(buildConfigWatcher);
@@ -62,4 +60,5 @@ public class GlobalPluginConfigurationTimerTask extends SafeTimerTask {
         globalPluginConfiguration.setSecretWatcher(secretWatcher);
         secretWatcher.start();
     }
+
 }

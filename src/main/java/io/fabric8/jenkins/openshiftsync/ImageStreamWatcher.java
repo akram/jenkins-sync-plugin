@@ -15,10 +15,13 @@
  */
 package io.fabric8.jenkins.openshiftsync;
 
+import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getOpenshiftClient;
 import static java.util.logging.Level.SEVERE;
 import static java.util.logging.Level.WARNING;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 import org.csanchez.jenkins.plugins.kubernetes.PodTemplate;
@@ -26,12 +29,20 @@ import org.csanchez.jenkins.plugins.kubernetes.PodTemplate;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.triggers.SafeTimerTask;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.client.Watch;
 import io.fabric8.kubernetes.client.Watcher.Action;
 import io.fabric8.openshift.api.model.ImageStream;
 import io.fabric8.openshift.api.model.ImageStreamList;
 
 public class ImageStreamWatcher extends BaseWatcher {
-  private final Logger logger = Logger.getLogger(getClass().getName());
+
+    private final static ConcurrentHashMap<String, Watch> watches = new ConcurrentHashMap<>();
+
+    public ConcurrentHashMap<String, Watch> getWatches() {
+        return watches;
+    }
+
+    private final static  Logger LOGGER = Logger.getLogger(ImageStreamWatcher.class.getName());
 
     @SuppressFBWarnings("EI_EXPOSE_REP2")
     public ImageStreamWatcher(String[] namespaces) {
@@ -48,34 +59,41 @@ public class ImageStreamWatcher extends BaseWatcher {
             @Override
             public void doRun() {
                 if (!CredentialsUtils.hasCredentials()) {
-                    logger.fine("No Openshift Token credential defined.");
+                    LOGGER.fine("No Openshift Token credential defined.");
                     return;
                 }
                 for (String ns : namespaces) {
                     ImageStreamList imageStreams = null;
                     try {
-                        logger.fine("listing ImageStream resources");
+                        LOGGER.fine("listing ImageStream resources");
                         imageStreams = OpenShiftUtils.getOpenshiftClient().imageStreams().inNamespace(ns).list();
                         onImageStreamInitialization(imageStreams);
-                        logger.fine("handled ImageStream resources");
+                        LOGGER.fine("handled ImageStream resources");
                     } catch (Exception e) {
-                        logger.log(SEVERE, "Failed to load ImageStreams: " + e, e);
+                        LOGGER.log(SEVERE, "Failed to load ImageStreams: " + e, e);
                     }
                     try {
                         String resourceVersion = "0";
                         if (imageStreams == null) {
-                            logger.warning("Unable to get image stream list; impacts resource version used for watch");
+                            LOGGER.warning("Unable to get image stream list; impacts resource version used for watch");
                         } else {
                             resourceVersion = imageStreams.getMetadata().getResourceVersion();
                         }
                         if (watches.get(ns) == null) {
-                            logger.info("creating ImageStream watch for namespace " + ns + " and resource version " + resourceVersion);
-                            ImageStreamWatcher w = ImageStreamWatcher.this;
-                            WatcherCallback<ImageStream> watcher = new WatcherCallback<ImageStream>(w, ns);
-                            addWatch(ns, OpenShiftUtils.getOpenshiftClient().imageStreams().inNamespace(ns).withResourceVersion(resourceVersion).watch(watcher));
+                            synchronized (watches) {
+                                if (watches.get(ns) == null) {
+                                    LOGGER.info("creating ImageStream watch for namespace " + ns
+                                            + " and resource version " + resourceVersion);
+                                    ImageStreamWatcher w = ImageStreamWatcher.this;
+                                    WatcherCallback<ImageStream> watcher = new WatcherCallback<ImageStream>(w, ns);
+                                    Watch watch = getOpenshiftClient().imageStreams().inNamespace(ns)
+                                            .withResourceVersion(resourceVersion).watch(watcher);
+                                    addWatch(ns, watch);
+                                }
+                            }
                         }
                     } catch (Exception e) {
-                        logger.log(SEVERE, "Failed to load ImageStreams: " + e, e);
+                        LOGGER.log(SEVERE, "Failed to load ImageStreams: " + e, e);
                     }
                 }
             }
@@ -84,7 +102,8 @@ public class ImageStreamWatcher extends BaseWatcher {
 
     public void start() {
         // lets process the initial state
-        logger.info("Now handling startup image streams!!");
+        LOGGER.info("Now handling startup image streams!!");
+        LOGGER.info("Watched namespaces: " + Arrays.toString(namespaces));
         super.start();
     }
 
@@ -106,14 +125,14 @@ public class ImageStreamWatcher extends BaseWatcher {
                 processSlavesForDeleteEvent(slaves, PodTemplateUtils.IMAGESTREAM_TYPE, uid, name, namespace);
                 break;
             case ERROR:
-                logger.warning("watch for imageStream " + name + " received error event ");
+                LOGGER.warning("watch for imageStream " + name + " received error event ");
                 break;
             default:
-                logger.warning("watch for imageStream " + name + " received unknown event " + action);
+                LOGGER.warning("watch for imageStream " + name + " received unknown event " + action);
                 break;
             }
         } catch (Exception e) {
-            logger.log(WARNING, "Caught: " + e, e);
+            LOGGER.log(WARNING, "Caught: " + e, e);
         }
     }
 
@@ -123,7 +142,7 @@ public class ImageStreamWatcher extends BaseWatcher {
         eventReceived(action, imageStream);
     }
 
-  private void onImageStreamInitialization(ImageStreamList imageStreams) {
+    private void onImageStreamInitialization(ImageStreamList imageStreams) {
         if (imageStreams != null) {
             List<ImageStream> items = imageStreams.getItems();
             if (items != null) {
@@ -138,7 +157,7 @@ public class ImageStreamWatcher extends BaseWatcher {
                             }
                         }
                     } catch (Exception e) {
-                        logger.log(SEVERE, "Failed to update job", e);
+                        LOGGER.log(SEVERE, "Failed to update job", e);
                     }
                 }
             }
