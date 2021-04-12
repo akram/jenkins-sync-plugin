@@ -41,16 +41,17 @@ import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
 import io.fabric8.kubernetes.client.informers.SharedInformerFactory;
 import io.fabric8.openshift.api.model.ImageStream;
 
-public class ImageStreamInformer extends ImageStreamWatcher implements ResourceEventHandler<ImageStream> {
+public class ImageStreamInformer implements ResourceEventHandler<ImageStream> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(SecretInformer.class.getName());
+    private static final Logger LOGGER = LoggerFactory.getLogger(ImageStreamInformer.class.getName());
     private SharedIndexInformer<ImageStream> informer;
+    protected String namespace;
 
     public ImageStreamInformer(String namespace) {
-        super(namespace);
+        this.namespace = namespace;
     }
 
-    @Override
+//    @Override
     public int getListIntervalInSeconds() {
         return 1_000 * GlobalPluginConfiguration.get().getImageStreamListInterval();
     }

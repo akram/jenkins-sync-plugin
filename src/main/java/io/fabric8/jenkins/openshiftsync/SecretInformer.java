@@ -17,9 +17,11 @@ package io.fabric8.jenkins.openshiftsync;
 
 import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_LABELS_SECRET_CREDENTIAL_SYNC;
 import static io.fabric8.jenkins.openshiftsync.Constants.VALUE_SECRET_SYNC;
+import static io.fabric8.jenkins.openshiftsync.CredentialsUtils.deleteCredential;
 import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getInformerFactory;
 import static java.util.Collections.singletonMap;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,19 +36,17 @@ import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
 import io.fabric8.kubernetes.client.informers.SharedInformerFactory;
 
-public class SecretInformer extends SecretWatcher implements ResourceEventHandler<Secret> {
+public class SecretInformer implements ResourceEventHandler<Secret> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(SecretInformer.class.getName());
-
     private final static ConcurrentHashMap<String, String> trackedSecrets = new ConcurrentHashMap<String, String>();
-
     private SharedIndexInformer<Secret> informer;
+    protected String namespace;
 
     public SecretInformer(String namespace) {
-        super(namespace);
+        this.namespace = namespace;
     }
 
-    @Override
     public int getListIntervalInSeconds() {
         return 1_000 * GlobalPluginConfiguration.get().getSecretListInterval();
     }
@@ -92,7 +92,7 @@ public class SecretInformer extends SecretWatcher implements ResourceEventHandle
     public void onDelete(Secret obj, boolean deletedFinalStateUnknown) {
         LOGGER.info("Secret informer received delete event for: {}" + obj);
         if (obj != null) {
-            CredentialsUtils.deleteCredential(obj);
+            deleteCredential(obj);
         }
     }
 
@@ -107,6 +107,70 @@ public class SecretInformer extends SecretWatcher implements ResourceEventHandle
                 LOGGER.error("Failed to update secred", e);
             }
         }
+    }
+
+    protected void insertOrUpdateCredentialFromSecret(final Secret secret) {
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                LOGGER.info("Upserting Secret with Uid " + metadata.getUid() + " with Name " + metadata.getName());
+                if (validSecret(secret)) {
+                    try {
+                        CredentialsUtils.upsertCredential(secret);
+                        trackedSecrets.put(metadata.getUid(), metadata.getResourceVersion());
+                    } catch (IOException e) {
+                        LOGGER.error("Credential has not been saved: " + e, e);
+                        throw new RuntimeException(e);
+                    }
+                }
+            }
+        }
+    }
+
+    protected void updateCredential(Secret secret) {
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                LOGGER.info("Modifying Secret with Uid " + metadata.getUid() + " with Name " + metadata.getName());
+                if (validSecret(secret) && shouldProcessSecret(secret)) {
+                    try {
+                        CredentialsUtils.upsertCredential(secret);
+                        trackedSecrets.put(metadata.getUid(), metadata.getResourceVersion());
+                    } catch (IOException e) {
+                        LOGGER.error("Secret has not been saved: " + e, e);
+                        throw new RuntimeException(e);
+                    }
+                }
+            }
+        }
+    }
+
+    protected boolean validSecret(Secret secret) {
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                String name = metadata.getName();
+                String namespace = metadata.getNamespace();
+                LOGGER.info("Validating Secret with Uid " + metadata.getUid() + " with Name " + name);
+                return name != null && !name.isEmpty() && namespace != null && !namespace.isEmpty();
+            }
+        }
+        return false;
+    }
+
+    protected boolean shouldProcessSecret(Secret secret) {
+        if (secret != null) {
+            ObjectMeta metadata = secret.getMetadata();
+            if (metadata != null) {
+                String uid = metadata.getUid();
+                String rv = metadata.getResourceVersion();
+                String oldResourceVersion = trackedSecrets.get(uid);
+                if (oldResourceVersion == null || !oldResourceVersion.equals(rv)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
 }

@@ -21,7 +21,7 @@ import static io.fabric8.jenkins.openshiftsync.BuildPhases.CANCELLED;
 import static io.fabric8.jenkins.openshiftsync.BuildPhases.PENDING;
 import static io.fabric8.jenkins.openshiftsync.BuildRunPolicy.SERIAL;
 import static io.fabric8.jenkins.openshiftsync.BuildRunPolicy.SERIAL_LATEST_ONLY;
-import static io.fabric8.jenkins.openshiftsync.BuildWatcher.addEventToJenkinsJobRun;
+import static io.fabric8.jenkins.openshiftsync.BuildInformer.addEventToJenkinsJobRun;
 import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_ANNOTATIONS_BUILD_NUMBER;
 import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_BUILD_STATUS_FIELD;
 import static io.fabric8.jenkins.openshiftsync.Constants.OPENSHIFT_LABELS_BUILD_CONFIG_NAME;
@@ -101,28 +101,29 @@ import jenkins.util.Timer;
  */
 public class JenkinsUtils {
 
-	private static final Logger LOGGER = Logger.getLogger(JenkinsUtils.class.getName());
-	private static final String PARAM_FROM_ENV_DESCRIPTION = "From OpenShift Build Environment Variable";
+    private static final Logger LOGGER = Logger.getLogger(JenkinsUtils.class.getName());
+    private static final String PARAM_FROM_ENV_DESCRIPTION = "From OpenShift Build Environment Variable";
 
-	public static Job getJob(String job) {
-		TopLevelItem item = Jenkins.getActiveInstance().getItem(job);
-		if (item instanceof Job) {
-			return (Job) item;
-		}
-		return null;
-	}
+    public static Job getJob(String job) {
+        TopLevelItem item = Jenkins.getActiveInstance().getItem(job);
+        if (item instanceof Job) {
+            return (Job) item;
+        }
+        return null;
+    }
 
-	public static String getRootUrl() {
-		// TODO is there a better place to find this?
-		String root = Jenkins.getActiveInstance().getRootUrl();
-		if (root == null || root.length() == 0) {
-			root = "http://localhost:8080/";
-		}
-		return root;
-	}
+    public static String getRootUrl() {
+        // TODO is there a better place to find this?
+        String root = Jenkins.getActiveInstance().getRootUrl();
+        if (root == null || root.length() == 0) {
+            root = "http://localhost:8080/";
+        }
+        return root;
+    }
 
-	public static void verifyEnvVars(Map<String, ParameterDefinition> paramMap, WorkflowJob workflowJob, BuildConfig buildConfig) throws AbortException {
-	    boolean rc;
+    public static void verifyEnvVars(Map<String, ParameterDefinition> paramMap, WorkflowJob workflowJob,
+            BuildConfig buildConfig) throws AbortException {
+        boolean rc;
         try {
             ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Void, Exception>() {
                 @Override
@@ -133,20 +134,19 @@ public class JenkinsUtils {
                         long now = System.currentTimeMillis();
                         boolean anyErrors = false;
                         do {
-                            job = Jenkins.getActiveInstance()
-                                    .getItemByFullName(fullName,
-                                            WorkflowJob.class);
-                            
+                            job = Jenkins.getActiveInstance().getItemByFullName(fullName, WorkflowJob.class);
+
                             if (job != null) {
                                 if (anyErrors)
                                     LOGGER.info("finally found workflow job for " + job.getFullName());
                                 break;
                             }
-                            
+
                             anyErrors = true;
                             // this should not occur if an impersonate call has been made higher up
                             // the stack
-                            LOGGER.warning("A run of workflow job " + workflowJob.getName() + " via fullname " + workflowJob.getFullName() + " unexpectantly not saved to disk.");
+                            LOGGER.warning("A run of workflow job " + workflowJob.getName() + " via fullname "
+                                    + workflowJob.getFullName() + " unexpectantly not saved to disk.");
                             List<WorkflowJob> jobList = Jenkins.getActiveInstance().getAllItems(WorkflowJob.class);
                             String jobNames = "";
                             for (WorkflowJob j : jobList) {
@@ -161,200 +161,204 @@ public class JenkinsUtils {
                             }
                         } while ((System.currentTimeMillis() - 5000) > now);
                         if (job == null) {
-                            // seen instances where if we throw exception immediately we lose our 
+                            // seen instances where if we throw exception immediately we lose our
                             // most recent logger updates
                             try {
                                 Thread.sleep(1000);
                             } catch (Throwable t) {
-                                
+
                             }
-                            throw new AbortException("workflow job " + workflowJob.getName() + " via fullname " + workflowJob.getFullName() + " could not be found ");
+                            throw new AbortException("workflow job " + workflowJob.getName() + " via fullname "
+                                    + workflowJob.getFullName() + " could not be found ");
                         }
                         ParametersDefinitionProperty props = job.getProperty(ParametersDefinitionProperty.class);
                         List<String> names = props.getParameterDefinitionNames();
                         for (String name : names) {
                             if (!paramMap.containsKey(name)) {
-                                throw new AbortException("A run of workflow job " + job.getName() + " was expecting parameter " + name + ", but it is not in the parameter list");
+                                throw new AbortException("A run of workflow job " + job.getName()
+                                        + " was expecting parameter " + name + ", but it is not in the parameter list");
                             }
                         }
                     }
                     return null;
                 }
             });
-            
+
         } catch (Exception e) {
             if (e instanceof AbortException)
-                throw (AbortException)e;
+                throw (AbortException) e;
             throw new AbortException(e.getMessage());
         }
-	}
+    }
 
-	public static Map<String, ParameterDefinition> addJobParamForBuildEnvs(WorkflowJob job, JenkinsPipelineBuildStrategy strat,
-			boolean replaceExisting) throws IOException {
-		List<EnvVar> envs = strat.getEnv();
+    public static Map<String, ParameterDefinition> addJobParamForBuildEnvs(WorkflowJob job,
+            JenkinsPipelineBuildStrategy strat, boolean replaceExisting) throws IOException {
+        List<EnvVar> envs = strat.getEnv();
         Map<String, ParameterDefinition> paramMap = null;
-		if (envs.size() > 0) {
-			// build list of current env var names for possible deletion of env
-			// vars currently stored
-			// as job params
-			List<String> envKeys = new ArrayList<String>();
-			for (EnvVar env : envs) {
-				envKeys.add(env.getName());
-			}
-			// get existing property defs, including any manually added from the
-			// jenkins console independent of BC
-			ParametersDefinitionProperty params = job.removeProperty(ParametersDefinitionProperty.class);
-			paramMap = new HashMap<String, ParameterDefinition>();
-			// store any existing parameters in map for easy key lookup
-			if (params != null) {
-				List<ParameterDefinition> existingParamList = params.getParameterDefinitions();
-				for (ParameterDefinition param : existingParamList) {
-					// if a user supplied param, add
-					if (param.getDescription() == null || !param.getDescription().equals(PARAM_FROM_ENV_DESCRIPTION))
-						paramMap.put(param.getName(), param);
-					else if (envKeys.contains(param.getName())) {
-						// the env var still exists on the openshift side so
-						// keep
-						paramMap.put(param.getName(), param);
-					}
-				}
-			}
-			for (EnvVar env : envs) {
-				if (replaceExisting) {
-					StringParameterDefinition envVar = new StringParameterDefinition(env.getName(), env.getValue() != null ? env.getValue() : "",
-							PARAM_FROM_ENV_DESCRIPTION);
-					paramMap.put(env.getName(), envVar);
-				} else if (!paramMap.containsKey(env.getName())) {
-					// if list from BC did not have this parameter, it was added
-					// via `oc start-build -e` ... in this
-					// case, we have chosen to make the default value an empty
-					// string
-					StringParameterDefinition envVar = new StringParameterDefinition(env.getName(), "",
-							PARAM_FROM_ENV_DESCRIPTION);
-					paramMap.put(env.getName(), envVar);
-				}
-			}
-			List<ParameterDefinition> newParamList = new ArrayList<ParameterDefinition>(paramMap.values());
-			job.addProperty(new ParametersDefinitionProperty(newParamList));
-		}
-		// force save here ... seen some timing issues with concurrent job updates and run initiations
+        if (envs.size() > 0) {
+            // build list of current env var names for possible deletion of env
+            // vars currently stored
+            // as job params
+            List<String> envKeys = new ArrayList<String>();
+            for (EnvVar env : envs) {
+                envKeys.add(env.getName());
+            }
+            // get existing property defs, including any manually added from the
+            // jenkins console independent of BC
+            ParametersDefinitionProperty params = job.removeProperty(ParametersDefinitionProperty.class);
+            paramMap = new HashMap<String, ParameterDefinition>();
+            // store any existing parameters in map for easy key lookup
+            if (params != null) {
+                List<ParameterDefinition> existingParamList = params.getParameterDefinitions();
+                for (ParameterDefinition param : existingParamList) {
+                    // if a user supplied param, add
+                    if (param.getDescription() == null || !param.getDescription().equals(PARAM_FROM_ENV_DESCRIPTION))
+                        paramMap.put(param.getName(), param);
+                    else if (envKeys.contains(param.getName())) {
+                        // the env var still exists on the openshift side so
+                        // keep
+                        paramMap.put(param.getName(), param);
+                    }
+                }
+            }
+            for (EnvVar env : envs) {
+                if (replaceExisting) {
+                    StringParameterDefinition envVar = new StringParameterDefinition(env.getName(),
+                            env.getValue() != null ? env.getValue() : "", PARAM_FROM_ENV_DESCRIPTION);
+                    paramMap.put(env.getName(), envVar);
+                } else if (!paramMap.containsKey(env.getName())) {
+                    // if list from BC did not have this parameter, it was added
+                    // via `oc start-build -e` ... in this
+                    // case, we have chosen to make the default value an empty
+                    // string
+                    StringParameterDefinition envVar = new StringParameterDefinition(env.getName(), "",
+                            PARAM_FROM_ENV_DESCRIPTION);
+                    paramMap.put(env.getName(), envVar);
+                }
+            }
+            List<ParameterDefinition> newParamList = new ArrayList<ParameterDefinition>(paramMap.values());
+            job.addProperty(new ParametersDefinitionProperty(newParamList));
+        }
+        // force save here ... seen some timing issues with concurrent job updates and
+        // run initiations
         InputStream jobStream = new StringInputStream(new XStream2().toXML(job));
-		updateJob(job, jobStream, null, null);
-		return paramMap;
-	}
+        updateJob(job, jobStream, null, null);
+        return paramMap;
+    }
 
-	public static List<Action> setJobRunParamsFromEnv(WorkflowJob job, JenkinsPipelineBuildStrategy strat,
-			List<Action> buildActions) {
-		List<EnvVar> envs = strat.getEnv();
-		List<String> envKeys = new ArrayList<String>();
-		List<ParameterValue> envVarList = new ArrayList<ParameterValue>();
-		if (envs.size() > 0) {
-			// build list of env var keys for compare with existing job params
-			for (EnvVar env : envs) {
-				envKeys.add(env.getName());
-        // Convert null value to empty string.
-        envVarList.add(new StringParameterValue(env.getName(), env.getValue() != null ? env.getValue() : ""));
-			}
-		}
+    public static List<Action> setJobRunParamsFromEnv(WorkflowJob job, JenkinsPipelineBuildStrategy strat,
+            List<Action> buildActions) {
+        List<EnvVar> envs = strat.getEnv();
+        List<String> envKeys = new ArrayList<String>();
+        List<ParameterValue> envVarList = new ArrayList<ParameterValue>();
+        if (envs.size() > 0) {
+            // build list of env var keys for compare with existing job params
+            for (EnvVar env : envs) {
+                envKeys.add(env.getName());
+                // Convert null value to empty string.
+                envVarList.add(new StringParameterValue(env.getName(), env.getValue() != null ? env.getValue() : ""));
+            }
+        }
 
-		// add any existing job params that were not env vars, using their
-		// default values
-		ParametersDefinitionProperty params = job.getProperty(ParametersDefinitionProperty.class);
-		if (params != null) {
-			List<ParameterDefinition> existingParamList = params.getParameterDefinitions();
-			for (ParameterDefinition param : existingParamList) {
-				if (!envKeys.contains(param.getName())) {
-					String type = param.getType();
-					switch (type) {
-					case "BooleanParameterDefinition":
-						BooleanParameterDefinition bpd = (BooleanParameterDefinition) param;
-						envVarList.add(bpd.getDefaultParameterValue());
-						break;
-					case "ChoiceParameterDefinition":
-						ChoiceParameterDefinition cpd = (ChoiceParameterDefinition) param;
-						envVarList.add(cpd.getDefaultParameterValue());
-						break;
-					case "CredentialsParameterDefinition":
-						CredentialsParameterDefinition crpd = (CredentialsParameterDefinition) param;
-						envVarList.add(crpd.getDefaultParameterValue());
-						break;
-					case "FileParameterDefinition":
-						FileParameterDefinition fpd = (FileParameterDefinition) param;
-						envVarList.add(fpd.getDefaultParameterValue());
-						break;
-					// don't currently support since sync-plugin does not claim
-					// subversion plugin as a direct dependency
-					/*
-					 * case "ListSubversionTagsParameterDefinition":
-					 * ListSubversionTagsParameterDefinition lpd =
-					 * (ListSubversionTagsParameterDefinition)param;
-					 * envVarList.add(lpd.getDefaultParameterValue()); break;
-					 */
-					case "PasswordParameterDefinition":
-						PasswordParameterDefinition ppd = (PasswordParameterDefinition) param;
-						envVarList.add(ppd.getDefaultParameterValue());
-						break;
-					case "RunParameterDefinition":
-						RunParameterDefinition rpd = (RunParameterDefinition) param;
-						envVarList.add(rpd.getDefaultParameterValue());
-						break;
-					case "StringParameterDefinition":
-						StringParameterDefinition spd = (StringParameterDefinition) param;
-						envVarList.add(spd.getDefaultParameterValue());
-						break;
-					default:
-						// used to have the following:
-						// envVarList.add(new
-						// StringParameterValue(param.getName(),
-						// (param.getDefaultParameterValue() != null &&
-						// param.getDefaultParameterValue().getValue() != null ?
-						// param.getDefaultParameterValue().getValue().toString()
-						// : "")));
-						// but mvn verify complained
-						ParameterValue pv = param.getDefaultParameterValue();
-						if (pv != null) {
-							Object val = pv.getValue();
-							if (val != null) {
-								envVarList.add(new StringParameterValue(param.getName(), val.toString()));
-							}
-						}
-					}
-				}
-			}
-		}
+        // add any existing job params that were not env vars, using their
+        // default values
+        ParametersDefinitionProperty params = job.getProperty(ParametersDefinitionProperty.class);
+        if (params != null) {
+            List<ParameterDefinition> existingParamList = params.getParameterDefinitions();
+            for (ParameterDefinition param : existingParamList) {
+                if (!envKeys.contains(param.getName())) {
+                    String type = param.getType();
+                    switch (type) {
+                    case "BooleanParameterDefinition":
+                        BooleanParameterDefinition bpd = (BooleanParameterDefinition) param;
+                        envVarList.add(bpd.getDefaultParameterValue());
+                        break;
+                    case "ChoiceParameterDefinition":
+                        ChoiceParameterDefinition cpd = (ChoiceParameterDefinition) param;
+                        envVarList.add(cpd.getDefaultParameterValue());
+                        break;
+                    case "CredentialsParameterDefinition":
+                        CredentialsParameterDefinition crpd = (CredentialsParameterDefinition) param;
+                        envVarList.add(crpd.getDefaultParameterValue());
+                        break;
+                    case "FileParameterDefinition":
+                        FileParameterDefinition fpd = (FileParameterDefinition) param;
+                        envVarList.add(fpd.getDefaultParameterValue());
+                        break;
+                    // don't currently support since sync-plugin does not claim
+                    // subversion plugin as a direct dependency
+                    /*
+                     * case "ListSubversionTagsParameterDefinition":
+                     * ListSubversionTagsParameterDefinition lpd =
+                     * (ListSubversionTagsParameterDefinition)param;
+                     * envVarList.add(lpd.getDefaultParameterValue()); break;
+                     */
+                    case "PasswordParameterDefinition":
+                        PasswordParameterDefinition ppd = (PasswordParameterDefinition) param;
+                        envVarList.add(ppd.getDefaultParameterValue());
+                        break;
+                    case "RunParameterDefinition":
+                        RunParameterDefinition rpd = (RunParameterDefinition) param;
+                        envVarList.add(rpd.getDefaultParameterValue());
+                        break;
+                    case "StringParameterDefinition":
+                        StringParameterDefinition spd = (StringParameterDefinition) param;
+                        envVarList.add(spd.getDefaultParameterValue());
+                        break;
+                    default:
+                        // used to have the following:
+                        // envVarList.add(new
+                        // StringParameterValue(param.getName(),
+                        // (param.getDefaultParameterValue() != null &&
+                        // param.getDefaultParameterValue().getValue() != null ?
+                        // param.getDefaultParameterValue().getValue().toString()
+                        // : "")));
+                        // but mvn verify complained
+                        ParameterValue pv = param.getDefaultParameterValue();
+                        if (pv != null) {
+                            Object val = pv.getValue();
+                            if (val != null) {
+                                envVarList.add(new StringParameterValue(param.getName(), val.toString()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-		if (envVarList.size() > 0)
-			buildActions.add(new ParametersAction(envVarList));
+        if (envVarList.size() > 0)
+            buildActions.add(new ParametersAction(envVarList));
 
-		return buildActions;
-	}
+        return buildActions;
+    }
 
-	public static List<Action> setJobRunParamsFromEnvAndUIParams(WorkflowJob job, JenkinsPipelineBuildStrategy strat,
-			List<Action> buildActions, ParametersAction params) {
-		List<EnvVar> envs = strat.getEnv();
-		Map<String, ParameterValue> envVarMap = new LinkedHashMap<>(envs.size());
-		if (envs.size() > 0) {
-			// build map of env vars for compare with existing job params
-			for (EnvVar env : envs) {
-				// Convert null value to empty string.
-				ParameterValue param = new StringParameterValue(env.getName(), env.getValue() != null ? env.getValue() : "");
-				envVarMap.put(env.getName(), param);
-			}
-		}
+    public static List<Action> setJobRunParamsFromEnvAndUIParams(WorkflowJob job, JenkinsPipelineBuildStrategy strat,
+            List<Action> buildActions, ParametersAction params) {
+        List<EnvVar> envs = strat.getEnv();
+        Map<String, ParameterValue> envVarMap = new LinkedHashMap<>(envs.size());
+        if (envs.size() > 0) {
+            // build map of env vars for compare with existing job params
+            for (EnvVar env : envs) {
+                // Convert null value to empty string.
+                ParameterValue param = new StringParameterValue(env.getName(),
+                        env.getValue() != null ? env.getValue() : "");
+                envVarMap.put(env.getName(), param);
+            }
+        }
 
-		if (params != null) {
-			for (ParameterValue userParam : params.getParameters()) {
-				envVarMap.put(userParam.getName(), userParam);
-			}
-		}
+        if (params != null) {
+            for (ParameterValue userParam : params.getParameters()) {
+                envVarMap.put(userParam.getName(), userParam);
+            }
+        }
 
-		if (envVarMap.size() > 0)
-			buildActions.add(new ParametersAction(new ArrayList<>(envVarMap.values())));
+        if (envVarMap.size() > 0)
+            buildActions.add(new ParametersAction(new ArrayList<>(envVarMap.values())));
 
-		return buildActions;
-	}
+        return buildActions;
+    }
 
-	  /**
+    /**
      * @param job   to trigger
      * @param build linked to it
      * @return true if "job" has been triggered
@@ -481,16 +485,16 @@ public class JenkinsUtils {
             return false;
         }
     }
-    
-	private static boolean isAlreadyTriggered(WorkflowJob job, Build build) {
-		return getRun(job, build) != null;
-	}
 
-	public static void cancelBuild(WorkflowJob job, Build build) {
-		cancelBuild(job, build, false);
-	}
+    private static boolean isAlreadyTriggered(WorkflowJob job, Build build) {
+        return getRun(job, build) != null;
+    }
 
-	public static void cancelBuild(WorkflowJob job, Build build, boolean deleted) {
+    public static void cancelBuild(WorkflowJob job, Build build) {
+        cancelBuild(job, build, false);
+    }
+
+    public static void cancelBuild(WorkflowJob job, Build build, boolean deleted) {
         if (!cancelQueuedBuild(job, build)) {
             cancelRunningBuild(job, build);
         }
@@ -502,161 +506,162 @@ public class JenkinsUtils {
         } catch (Exception e) {
             throw e;
         }
-	}
+    }
 
-	private static WorkflowRun getRun(WorkflowJob job, Build build) {
-		if (build != null && build.getMetadata() != null) {
-			return getRun(job, build.getMetadata().getUid(), 0);
-		}
-		return null;
-	}
+    private static WorkflowRun getRun(WorkflowJob job, Build build) {
+        if (build != null && build.getMetadata() != null) {
+            return getRun(job, build.getMetadata().getUid(), 0);
+        }
+        return null;
+    }
 
-	private static WorkflowRun getRun(WorkflowJob job, String buildUid, int retry) {
-	    try {
-	        for (WorkflowRun run : job.getBuilds()) {
-	            BuildCause cause = run.getCause(BuildCause.class);
-	            if (cause != null && cause.getUid().equals(buildUid)) {
-	                return run;
-	            }
-	        }
-	    } catch (Throwable t) {
-	        if (retry == 0) {
-	            try {
+    private static WorkflowRun getRun(WorkflowJob job, String buildUid, int retry) {
+        try {
+            for (WorkflowRun run : job.getBuilds()) {
+                BuildCause cause = run.getCause(BuildCause.class);
+                if (cause != null && cause.getUid().equals(buildUid)) {
+                    return run;
+                }
+            }
+        } catch (Throwable t) {
+            if (retry == 0) {
+                try {
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
                 }
-	            return getRun(job, buildUid, 1);
-	        }
-	        LOGGER.log(Level.WARNING, "Jenkins unavailability accessing job run; have to assume it does not exist", t);
-	    }
-		return null;
-	}
+                return getRun(job, buildUid, 1);
+            }
+            LOGGER.log(Level.WARNING, "Jenkins unavailability accessing job run; have to assume it does not exist", t);
+        }
+        return null;
+    }
 
-	public static void deleteRun(WorkflowRun run) {
-			try {
-			  LOGGER.info("Deleting run: " + run.toString());
-				run.delete();
-			} catch (IOException e) {
-				LOGGER.warning("Unable to delete run " + run.toString() + ":" + e.getMessage());
-			}
-	}
+    public static void deleteRun(WorkflowRun run) {
+        try {
+            LOGGER.info("Deleting run: " + run.toString());
+            run.delete();
+        } catch (IOException e) {
+            LOGGER.warning("Unable to delete run " + run.toString() + ":" + e.getMessage());
+        }
+    }
 
-  public static void deleteRun(WorkflowJob job, Build build) {
-      WorkflowRun run = getRun(job, build);
-      deleteRun(run);
-  }
+    public static void deleteRun(WorkflowJob job, Build build) {
+        WorkflowRun run = getRun(job, build);
+        deleteRun(run);
+    }
 
-	private static boolean cancelRunningBuild(WorkflowJob job, Build build) {
-		String buildUid = build.getMetadata().getUid();
-		WorkflowRun run = getRun(job, buildUid, 0);
-		if (run != null && run.isBuilding()) {
-			terminateRun(run);
-			return true;
-		}
-		return false;
-	}
+    private static boolean cancelRunningBuild(WorkflowJob job, Build build) {
+        String buildUid = build.getMetadata().getUid();
+        WorkflowRun run = getRun(job, buildUid, 0);
+        if (run != null && run.isBuilding()) {
+            terminateRun(run);
+            return true;
+        }
+        return false;
+    }
 
-	private static boolean cancelNotYetStartedBuild(WorkflowJob job, Build build) {
-		String buildUid = build.getMetadata().getUid();
-		WorkflowRun run = getRun(job, buildUid, 0);
-		if (run != null && run.hasntStartedYet()) {
-			terminateRun(run);
-			return true;
-		}
-		return false;
-	}
+    private static boolean cancelNotYetStartedBuild(WorkflowJob job, Build build) {
+        String buildUid = build.getMetadata().getUid();
+        WorkflowRun run = getRun(job, buildUid, 0);
+        if (run != null && run.hasntStartedYet()) {
+            terminateRun(run);
+            return true;
+        }
+        return false;
+    }
 
-	private static void cancelNotYetStartedBuilds(WorkflowJob job, String bcUid) {
-		cancelQueuedBuilds(job, bcUid);
-		for (WorkflowRun run : job.getBuilds()) {
-			if (run != null && run.hasntStartedYet()) {
-				BuildCause cause = run.getCause(BuildCause.class);
-				if (cause != null && cause.getBuildConfigUid().equals(bcUid)) {
-					terminateRun(run);
-				}
-			}
-		}
-	}
+    private static void cancelNotYetStartedBuilds(WorkflowJob job, String bcUid) {
+        cancelQueuedBuilds(job, bcUid);
+        for (WorkflowRun run : job.getBuilds()) {
+            if (run != null && run.hasntStartedYet()) {
+                BuildCause cause = run.getCause(BuildCause.class);
+                if (cause != null && cause.getBuildConfigUid().equals(bcUid)) {
+                    terminateRun(run);
+                }
+            }
+        }
+    }
 
-	private static void terminateRun(final WorkflowRun run) {
-		ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Void, RuntimeException>() {
-			@Override
-			public Void call() throws RuntimeException {
-				run.doTerm();
-				Timer.get().schedule(new SafeTimerTask() {
-					@Override
-					public void doRun() {
-						ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Void, RuntimeException>() {
-							@Override
-							public Void call() throws RuntimeException {
-								run.doKill();
-								return null;
-							}
-						});
-					}
-				}, 5, TimeUnit.SECONDS);
-				return null;
-			}
-		});
-	}
+    private static void terminateRun(final WorkflowRun run) {
+        ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Void, RuntimeException>() {
+            @Override
+            public Void call() throws RuntimeException {
+                run.doTerm();
+                Timer.get().schedule(new SafeTimerTask() {
+                    @Override
+                    public void doRun() {
+                        ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Void, RuntimeException>() {
+                            @Override
+                            public Void call() throws RuntimeException {
+                                run.doKill();
+                                return null;
+                            }
+                        });
+                    }
+                }, 5, TimeUnit.SECONDS);
+                return null;
+            }
+        });
+    }
 
-	@SuppressFBWarnings("SE_BAD_FIELD")
-	public static boolean cancelQueuedBuild(WorkflowJob job, Build build) {
-		String buildUid = build.getMetadata().getUid();
-		final Queue buildQueue = Jenkins.getActiveInstance().getQueue();
-		for (final Queue.Item item : buildQueue.getItems()) {
-			for (Cause cause : item.getCauses()) {
-				if (cause instanceof BuildCause && ((BuildCause) cause).getUid().equals(buildUid)) {
-					return ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Boolean, RuntimeException>() {
-						@Override
-						public Boolean call() throws RuntimeException {
-							buildQueue.cancel(item);
-							return true;
-						}
-					});
-				}
-			}
-		}
-		return cancelNotYetStartedBuild(job, build);
-	}
+    @SuppressFBWarnings("SE_BAD_FIELD")
+    public static boolean cancelQueuedBuild(WorkflowJob job, Build build) {
+        String buildUid = build.getMetadata().getUid();
+        final Queue buildQueue = Jenkins.getActiveInstance().getQueue();
+        for (final Queue.Item item : buildQueue.getItems()) {
+            for (Cause cause : item.getCauses()) {
+                if (cause instanceof BuildCause && ((BuildCause) cause).getUid().equals(buildUid)) {
+                    return ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Boolean, RuntimeException>() {
+                        @Override
+                        public Boolean call() throws RuntimeException {
+                            buildQueue.cancel(item);
+                            return true;
+                        }
+                    });
+                }
+            }
+        }
+        return cancelNotYetStartedBuild(job, build);
+    }
 
-	public static void cancelQueuedBuilds(WorkflowJob job, String bcUid) {
-		Queue buildQueue = Jenkins.getActiveInstance().getQueue();
-		for (Queue.Item item : buildQueue.getItems()) {
-			for (Cause cause : item.getCauses()) {
-				if (cause instanceof BuildCause) {
-					BuildCause buildCause = (BuildCause) cause;
-					if (buildCause.getBuildConfigUid().equals(bcUid)) {
-						Build build = new BuildBuilder().withNewMetadata().withNamespace(buildCause.getNamespace())
-								.withName(buildCause.getName()).and().build();
-						cancelQueuedBuild(job, build);
-					}
-				}
-			}
-		}
-	}
+    public static void cancelQueuedBuilds(WorkflowJob job, String bcUid) {
+        Queue buildQueue = Jenkins.getActiveInstance().getQueue();
+        for (Queue.Item item : buildQueue.getItems()) {
+            for (Cause cause : item.getCauses()) {
+                if (cause instanceof BuildCause) {
+                    BuildCause buildCause = (BuildCause) cause;
+                    if (buildCause.getBuildConfigUid().equals(bcUid)) {
+                        Build build = new BuildBuilder().withNewMetadata().withNamespace(buildCause.getNamespace())
+                                .withName(buildCause.getName()).and().build();
+                        cancelQueuedBuild(job, build);
+                    }
+                }
+            }
+        }
+    }
 
-	public static WorkflowJob getJobFromBuild(Build build) {
-		String buildConfigName = build.getStatus().getConfig().getName();
-		if (StringUtils.isEmpty(buildConfigName)) {
-			return null;
-		}
+    public static WorkflowJob getJobFromBuild(Build build) {
+        String buildConfigName = build.getStatus().getConfig().getName();
+        if (StringUtils.isEmpty(buildConfigName)) {
+            return null;
+        }
 
-		WorkflowJob job = BuildConfigToJobMap.getJobFromBuildConfigNameNamespace(buildConfigName,
-		        build.getMetadata().getNamespace());
-		if (job != null) {
-		    return job;
-		}
+        WorkflowJob job = BuildConfigToJobMap.getJobFromBuildConfigNameNamespace(buildConfigName,
+                build.getMetadata().getNamespace());
+        if (job != null) {
+            return job;
+        }
 
-		BuildConfig buildConfig = getAuthenticatedOpenShiftClient().buildConfigs()
-				.inNamespace(build.getMetadata().getNamespace()).withName(buildConfigName).get();
-		if (buildConfig == null) {
-			return null;
-		}
-		return getJobFromBuildConfig(buildConfig);
-	}
+        BuildConfig buildConfig = getAuthenticatedOpenShiftClient().buildConfigs()
+                .inNamespace(build.getMetadata().getNamespace()).withName(buildConfigName).get();
+        if (buildConfig == null) {
+            return null;
+        }
+        return getJobFromBuildConfig(buildConfig);
+    }
 
-    public static void updateJob(WorkflowJob job, InputStream jobStream, String existingBuildRunPolicy, BuildConfigProjectProperty buildConfigProjectProperty) throws IOException {
+    public static void updateJob(WorkflowJob job, InputStream jobStream, String existingBuildRunPolicy,
+            BuildConfigProjectProperty buildConfigProjectProperty) throws IOException {
         try {
             ACL.impersonate(ACL.SYSTEM, new NotReallyRoleSensitiveCallable<Void, Exception>() {
                 @Override
@@ -664,80 +669,73 @@ public class JenkinsUtils {
                     Source source = new StreamSource(jobStream);
                     job.updateByXml(source);
                     job.save();
-                    if (existingBuildRunPolicy != null && buildConfigProjectProperty != null && !existingBuildRunPolicy.equals(buildConfigProjectProperty.getBuildRunPolicy())) {
+                    if (existingBuildRunPolicy != null && buildConfigProjectProperty != null
+                            && !existingBuildRunPolicy.equals(buildConfigProjectProperty.getBuildRunPolicy())) {
                         maybeScheduleNext(job);
                     }
                     return null;
                 }
             });
-            
+
         } catch (Exception e) {
             throw new IOException(e);
         }
     }
 
-	public static void maybeScheduleNext(WorkflowJob job) {
-		BuildConfigProjectProperty bcp = job.getProperty(BuildConfigProjectProperty.class);
-		if (bcp == null) {
-			return;
-		}
+    public static void maybeScheduleNext(WorkflowJob job) {
+        BuildConfigProjectProperty bcp = job.getProperty(BuildConfigProjectProperty.class);
+        if (bcp == null) {
+            return;
+        }
 
-		List<Build> builds = getAuthenticatedOpenShiftClient().builds().inNamespace(bcp.getNamespace())
-				.withField(OPENSHIFT_BUILD_STATUS_FIELD, BuildPhases.NEW)
-				.withLabel(OPENSHIFT_LABELS_BUILD_CONFIG_NAME, bcp.getName()).list().getItems();
-		handleBuildList(job, builds, bcp);
-	}
+        List<Build> builds = getAuthenticatedOpenShiftClient().builds().inNamespace(bcp.getNamespace())
+                .withField(OPENSHIFT_BUILD_STATUS_FIELD, BuildPhases.NEW)
+                .withLabel(OPENSHIFT_LABELS_BUILD_CONFIG_NAME, bcp.getName()).list().getItems();
+        handleBuildList(job, builds, bcp);
+    }
 
-	public static void handleBuildList(WorkflowJob job, List<Build> builds,
-			BuildConfigProjectProperty buildConfigProjectProperty) {
-		if (builds.isEmpty()) {
-			return;
-		}
-		boolean isSerialLatestOnly = SERIAL_LATEST_ONLY.equals(buildConfigProjectProperty.getBuildRunPolicy());
-		if (isSerialLatestOnly) {
-			// Try to cancel any builds that haven't actually started, waiting
-			// for executor perhaps.
-			cancelNotYetStartedBuilds(job, buildConfigProjectProperty.getUid());
-		}
-		sort(builds, new Comparator<Build>() {
-			@Override
-			public int compare(Build b1, Build b2) {
-				// Order so cancellations are first in list so we can stop
-				// processing build list when build run policy is
-				// SerialLatestOnly and job is currently building.
-				Boolean b1Cancelled = b1.getStatus() != null && b1.getStatus().getCancelled() != null
-						? b1.getStatus().getCancelled()
-						: false;
-				Boolean b2Cancelled = b2.getStatus() != null && b2.getStatus().getCancelled() != null
-						? b2.getStatus().getCancelled()
-						: false;
-				// Inverse comparison as boolean comparison would put false
-				// before true. Could have inverted both cancellation
-				// states but this removes that step.
-				int cancellationCompare = b2Cancelled.compareTo(b1Cancelled);
-				if (cancellationCompare != 0) {
-					return cancellationCompare;
-				}
+    public static void handleBuildList(WorkflowJob job, List<Build> builds,
+            BuildConfigProjectProperty buildConfigProjectProperty) {
+        if (builds.isEmpty()) {
+            return;
+        }
+        boolean isSerialLatestOnly = SERIAL_LATEST_ONLY.equals(buildConfigProjectProperty.getBuildRunPolicy());
+        if (isSerialLatestOnly) {
+            // Try to cancel any builds that haven't actually started, waiting
+            // for executor perhaps.
+            cancelNotYetStartedBuilds(job, buildConfigProjectProperty.getUid());
+        }
+        sort(builds, new Comparator<Build>() {
+            @Override
+            public int compare(Build b1, Build b2) {
+                // Order so cancellations are first in list so we can stop
+                // processing build list when build run policy is
+                // SerialLatestOnly and job is currently building.
+                Boolean b1Cancelled = b1.getStatus() != null && b1.getStatus().getCancelled() != null
+                        ? b1.getStatus().getCancelled()
+                        : false;
+                Boolean b2Cancelled = b2.getStatus() != null && b2.getStatus().getCancelled() != null
+                        ? b2.getStatus().getCancelled()
+                        : false;
+                // Inverse comparison as boolean comparison would put false
+                // before true. Could have inverted both cancellation
+                // states but this removes that step.
+                int cancellationCompare = b2Cancelled.compareTo(b1Cancelled);
+                if (cancellationCompare != 0) {
+                    return cancellationCompare;
+                }
 
                 if (b1.getMetadata().getAnnotations() == null
-                        || b1.getMetadata().getAnnotations()
-                                .get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER) == null) {
-                    LOGGER.warning("cannot compare build "
-                            + b1.getMetadata().getName()
-                            + " from namespace "
-                            + b1.getMetadata().getNamespace()
-                            + ", has bad annotations: "
+                        || b1.getMetadata().getAnnotations().get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER) == null) {
+                    LOGGER.warning("cannot compare build " + b1.getMetadata().getName() + " from namespace "
+                            + b1.getMetadata().getNamespace() + ", has bad annotations: "
                             + b1.getMetadata().getAnnotations());
                     return 0;
                 }
                 if (b2.getMetadata().getAnnotations() == null
-                        || b2.getMetadata().getAnnotations()
-                                .get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER) == null) {
-                    LOGGER.warning("cannot compare build "
-                            + b2.getMetadata().getName()
-                            + " from namespace "
-                            + b2.getMetadata().getNamespace()
-                            + ", has bad annotations: "
+                        || b2.getMetadata().getAnnotations().get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER) == null) {
+                    LOGGER.warning("cannot compare build " + b2.getMetadata().getName() + " from namespace "
+                            + b2.getMetadata().getNamespace() + ", has bad annotations: "
                             + b2.getMetadata().getAnnotations());
                     return 0;
                 }
@@ -745,113 +743,100 @@ public class JenkinsUtils {
                 try {
                     rc = Long.compare(
 
-                            Long.parseLong(b1
-                                    .getMetadata()
-                                    .getAnnotations()
-                                    .get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER)),
-                            Long.parseLong(b2
-                                    .getMetadata()
-                                    .getAnnotations()
-                                    .get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER)));
+                            Long.parseLong(b1.getMetadata().getAnnotations().get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER)),
+                            Long.parseLong(b2.getMetadata().getAnnotations().get(OPENSHIFT_ANNOTATIONS_BUILD_NUMBER)));
                 } catch (Throwable t) {
                     LOGGER.log(Level.FINE, "handleBuildList", t);
                 }
                 return rc;
-			}
-		});
-		boolean isSerial = SERIAL.equals(buildConfigProjectProperty.getBuildRunPolicy());
-		boolean jobIsBuilding = job.isBuilding();
-		for (int i = 0; i < builds.size(); i++) {
-			Build b = builds.get(i);
-			if (!OpenShiftUtils.isPipelineStrategyBuild(b))
-				continue;
-			// For SerialLatestOnly we should try to cancel all builds before
-			// the latest one requested.
-			if (isSerialLatestOnly) {
-				// If the job is currently building, then let's return on the
-				// first non-cancellation request so we do not try to
-				// queue a new build.
-				if (jobIsBuilding && !isCancelled(b.getStatus())) {
-					return;
-				}
+            }
+        });
+        boolean isSerial = SERIAL.equals(buildConfigProjectProperty.getBuildRunPolicy());
+        boolean jobIsBuilding = job.isBuilding();
+        for (int i = 0; i < builds.size(); i++) {
+            Build b = builds.get(i);
+            if (!OpenShiftUtils.isPipelineStrategyBuild(b))
+                continue;
+            // For SerialLatestOnly we should try to cancel all builds before
+            // the latest one requested.
+            if (isSerialLatestOnly) {
+                // If the job is currently building, then let's return on the
+                // first non-cancellation request so we do not try to
+                // queue a new build.
+                if (jobIsBuilding && !isCancelled(b.getStatus())) {
+                    return;
+                }
 
-				if (i < builds.size() - 1) {
-					cancelQueuedBuild(job, b);
-					updateOpenShiftBuildPhase(b, CANCELLED);
-					continue;
-				}
-			}
-			boolean buildAdded = false;
-			try {
-				buildAdded = addEventToJenkinsJobRun(b);
-			} catch (IOException e) {
-				ObjectMeta meta = b.getMetadata();
-				LOGGER.log(WARNING, "Failed to add new build " + meta.getNamespace() + "/" + meta.getName(), e);
-			}
-			// If it's a serial build then we only need to schedule the first
-			// build request.
-			if (isSerial && buildAdded) {
-				return;
-			}
-		}
-	}
+                if (i < builds.size() - 1) {
+                    cancelQueuedBuild(job, b);
+                    updateOpenShiftBuildPhase(b, CANCELLED);
+                    continue;
+                }
+            }
+            boolean buildAdded = addEventToJenkinsJobRun(b);
+            // If it's a serial build then we only need to schedule the first
+            // build request.
+            if (isSerial && buildAdded) {
+                return;
+            }
+        }
+    }
 
-	public static String getFullJobName(WorkflowJob job) {
-		return job.getRelativeNameFrom(Jenkins.getInstance());
-	}
+    public static String getFullJobName(WorkflowJob job) {
+        return job.getRelativeNameFrom(Jenkins.getInstance());
+    }
 
-	public static String getBuildConfigName(WorkflowJob job) {
-		String name = getFullJobName(job);
-		GlobalPluginConfiguration config = GlobalPluginConfiguration.get();
-		String[] paths = name.split("/");
-		if (paths.length > 1) {
-			String orgName = paths[0];
-			if (StringUtils.isNotBlank(orgName)) {
-				if (config != null) {
-					String skipOrganizationPrefix = config.getSkipOrganizationPrefix();
-					if (StringUtils.isEmpty(skipOrganizationPrefix)) {
-						config.setSkipOrganizationPrefix(orgName);
-						skipOrganizationPrefix = config.getSkipOrganizationPrefix();
-					}
+    public static String getBuildConfigName(WorkflowJob job) {
+        String name = getFullJobName(job);
+        GlobalPluginConfiguration config = GlobalPluginConfiguration.get();
+        String[] paths = name.split("/");
+        if (paths.length > 1) {
+            String orgName = paths[0];
+            if (StringUtils.isNotBlank(orgName)) {
+                if (config != null) {
+                    String skipOrganizationPrefix = config.getSkipOrganizationPrefix();
+                    if (StringUtils.isEmpty(skipOrganizationPrefix)) {
+                        config.setSkipOrganizationPrefix(orgName);
+                        skipOrganizationPrefix = config.getSkipOrganizationPrefix();
+                    }
 
-					// if the default organization lets strip the organization name from the prefix
-					int prefixLength = orgName.length() + 1;
-					if (orgName.equals(skipOrganizationPrefix) && name.length() > prefixLength) {
-						name = name.substring(prefixLength);
-					}
-				}
-			}
-		}
+                    // if the default organization lets strip the organization name from the prefix
+                    int prefixLength = orgName.length() + 1;
+                    if (orgName.equals(skipOrganizationPrefix) && name.length() > prefixLength) {
+                        name = name.substring(prefixLength);
+                    }
+                }
+            }
+        }
 
-		// lets avoid the .master postfixes as we treat master as the default branch
-		// name
-		String masterSuffix = "/master";
-		if (config != null) {
-			String skipBranchSuffix = config.getSkipBranchSuffix();
-			if (StringUtils.isEmpty(skipBranchSuffix)) {
-				config.setSkipBranchSuffix("master");
-				skipBranchSuffix = config.getSkipBranchSuffix();
-			}
-			masterSuffix = "/" + skipBranchSuffix;
-		}
-		if (name.endsWith(masterSuffix) && name.length() > masterSuffix.length()) {
-			name = name.substring(0, name.length() - masterSuffix.length());
-		}
-		return name;
-	}
+        // lets avoid the .master postfixes as we treat master as the default branch
+        // name
+        String masterSuffix = "/master";
+        if (config != null) {
+            String skipBranchSuffix = config.getSkipBranchSuffix();
+            if (StringUtils.isEmpty(skipBranchSuffix)) {
+                config.setSkipBranchSuffix("master");
+                skipBranchSuffix = config.getSkipBranchSuffix();
+            }
+            masterSuffix = "/" + skipBranchSuffix;
+        }
+        if (name.endsWith(masterSuffix) && name.length() > masterSuffix.length()) {
+            name = name.substring(0, name.length() - masterSuffix.length());
+        }
+        return name;
+    }
 
-	public static KubernetesCloud getKubernetesCloud() {
-		// pedantic mvn:findbugs
-		Jenkins jenkins = Jenkins.getInstance();
-		if (jenkins == null)
-			return null;
-		Cloud openShiftCloud = jenkins.getCloud("openshift");
-		if (openShiftCloud instanceof KubernetesCloud) {
-			return (KubernetesCloud) openShiftCloud;
-		}
+    public static KubernetesCloud getKubernetesCloud() {
+        // pedantic mvn:findbugs
+        Jenkins jenkins = Jenkins.getInstance();
+        if (jenkins == null)
+            return null;
+        Cloud openShiftCloud = jenkins.getCloud("openshift");
+        if (openShiftCloud instanceof KubernetesCloud) {
+            return (KubernetesCloud) openShiftCloud;
+        }
 
-		return null;
-	}
-
+        return null;
+    }
 
 }

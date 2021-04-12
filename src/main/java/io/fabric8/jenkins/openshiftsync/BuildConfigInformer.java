@@ -27,6 +27,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import java.util.List;
 
+import org.eclipse.jetty.util.ConcurrentHashSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,16 +50,16 @@ import jenkins.util.Timer;
  * ensure there is a suitable Jenkins Job object defined with the correct
  * configuration
  */
-public class BuildConfigInformer extends BuildConfigWatcher implements ResourceEventHandler<BuildConfig> {
+public class BuildConfigInformer implements ResourceEventHandler<BuildConfig> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(SecretInformer.class.getName());
+    private static final Logger LOGGER = LoggerFactory.getLogger(BuildConfigInformer.class.getName());
     private SharedIndexInformer<BuildConfig> informer;
+    protected String namespace;
 
     public BuildConfigInformer(String namespace) {
-        super(namespace);
+        this.namespace = namespace;
     }
 
-    @Override
     public int getListIntervalInSeconds() {
         return 1_000 * GlobalPluginConfiguration.get().getBuildConfigListInterval();
     }
@@ -123,7 +124,7 @@ public class BuildConfigInformer extends BuildConfigWatcher implements ResourceE
             public Void call() throws Exception {
                 // if bc event came after build events, let's poke the BuildWatcher builds with
                 // no BC list to create job runs
-                BuildWatcher.flushBuildsWithNoBCList();
+                BuildInformer.flushBuildsWithNoBCList();
                 // now, if the build event was lost and never received, builds will stay in new
                 // for 5 minutes ...
                 // let's launch a background thread to clean them up at a quicker interval than
@@ -142,7 +143,7 @@ public class BuildConfigInformer extends BuildConfigWatcher implements ResourceE
                                 .withLabel(OPENSHIFT_LABELS_BUILD_CONFIG_NAME, name).list();
                         if (buildList.getItems().size() > 0) {
                             LOGGER.info("build backup query for " + name + " found new builds");
-                            BuildWatcher.onInitialBuilds(buildList);
+                            BuildInformer.onInit(buildList.getItems());
                         }
                     }
                 };
@@ -158,7 +159,7 @@ public class BuildConfigInformer extends BuildConfigWatcher implements ResourceE
             // sync on intern of name should guarantee sync on same actual obj
             synchronized (buildConfig.getMetadata().getUid().intern()) {
                 try {
-                    ACL.impersonate(ACL.SYSTEM, new JobProcessor(this, buildConfig));
+                    ACL.impersonate(ACL.SYSTEM, new JobProcessor(buildConfig));
                 } catch (Exception e) {
                     LOGGER.error("Error while trying to insert JobRun: " + e);
 
@@ -219,6 +220,21 @@ public class BuildConfigInformer extends BuildConfigWatcher implements ResourceE
 
     }
 
+    // for coordinating between ItemListener.onUpdate and onDeleted both
+    // getting called when we delete a job; ID should be combo of namespace
+    // and name for BC to properly differentiate; we don't use UUID since
+    // when we filter on the ItemListener side the UUID may not be
+    // available
+    private static final ConcurrentHashSet<String> deletesInProgress = new ConcurrentHashSet<String>();
+
+    public static void deleteInProgress(String bcName) {
+        deletesInProgress.add(bcName);
+    }
+
+    public static void deleteCompleted(String bcID) {
+        deletesInProgress.remove(bcID);
+    }
+
     private void onInit(List<BuildConfig> list) {
         for (BuildConfig buildConfig : list) {
             try {
@@ -230,7 +246,7 @@ public class BuildConfigInformer extends BuildConfigWatcher implements ResourceE
         // poke the BuildWatcher builds with no BC list and see if we
         // can create job
         // runs for premature builds
-        BuildWatcher.flushBuildsWithNoBCList();
+        BuildInformer.flushBuildsWithNoBCList();
     }
 
     // in response to receiving an openshift delete build config event, this
@@ -268,4 +284,9 @@ public class BuildConfigInformer extends BuildConfigWatcher implements ResourceE
             }
         }
     }
+    
+    public static boolean isDeleteInProgress(String bcID) {
+        return deletesInProgress.contains(bcID);
+    }
+    
 }

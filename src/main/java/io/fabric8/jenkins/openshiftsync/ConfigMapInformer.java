@@ -31,16 +31,16 @@ import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
 import io.fabric8.kubernetes.client.informers.SharedInformerFactory;
 
-public class ConfigMapInformer extends ConfigMapWatcher implements ResourceEventHandler<ConfigMap> {
+public class ConfigMapInformer implements ResourceEventHandler<ConfigMap> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(SecretInformer.class.getName());
+    private static final Logger LOGGER = LoggerFactory.getLogger(ConfigMapInformer.class.getName());
     private SharedIndexInformer<ConfigMap> informer;
+    protected String namespace;
 
     public ConfigMapInformer(String namespace) {
-        super(namespace);
+        this.namespace = namespace;
     }
 
-    @Override
     public int getListIntervalInSeconds() {
         return 1_000 * GlobalPluginConfiguration.get().getConfigMapListInterval();
     }

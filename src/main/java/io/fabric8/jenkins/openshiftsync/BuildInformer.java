@@ -61,14 +61,16 @@ import io.fabric8.openshift.client.OpenShiftClient;
 import jenkins.model.Jenkins;
 import jenkins.security.NotReallyRoleSensitiveCallable;
 
-public class BuildInformer extends BuildWatcher implements ResourceEventHandler<Build> {
+public class BuildInformer implements ResourceEventHandler<Build> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(SecretInformer.class.getName());
+    private static final Logger LOGGER = LoggerFactory.getLogger(BuildInformer.class.getName());
     private final static BuildComparator BUILD_COMPARATOR = new BuildComparator();
     private SharedIndexInformer<Build> informer;
+    protected String namespace;
+    protected static final ConcurrentHashMap<String, Build> buildsWithNoBCList = new ConcurrentHashMap<String, Build>();
 
     public BuildInformer(String namespace) {
-        super(namespace);
+        this.namespace = namespace;
     }
 
     /**
@@ -79,7 +81,6 @@ public class BuildInformer extends BuildWatcher implements ResourceEventHandler<
      * builds getting kicked off so quit depending on so moved off of concurrent
      * hash set to concurrent hash map using namepace/name key
      */
-    @Override
     public int getListIntervalInSeconds() {
         return 1_000 * GlobalPluginConfiguration.get().getBuildListInterval();
     }
@@ -251,7 +252,7 @@ public class BuildInformer extends BuildWatcher implements ResourceEventHandler<
             buildsWithNoBCList.put(build.getMetadata().getNamespace() + build.getMetadata().getName(), build);
         } catch (ConcurrentModificationException | IllegalArgumentException | UnsupportedOperationException
                 | NullPointerException e) {
-            LOGGER.warn( "Failed to add item " + build.getMetadata().getName(), e);
+            LOGGER.warn("Failed to add item " + build.getMetadata().getName(), e);
         }
     }
 
@@ -275,7 +276,7 @@ public class BuildInformer extends BuildWatcher implements ResourceEventHandler<
                     LOGGER.info("triggering job run for previously skipped build " + build.getMetadata().getName());
                     triggerJob(job, build);
                 } catch (IOException e) {
-                    LOGGER.warn( "flushBuildsWithNoBCList", e);
+                    LOGGER.warn("flushBuildsWithNoBCList", e);
                 }
                 try {
                     synchronized (buildsWithNoBCList) {
@@ -290,7 +291,7 @@ public class BuildInformer extends BuildWatcher implements ResourceEventHandler<
                     // over extended usage ... probably can remove at some
                     // point
                     anyRemoveFailures = true;
-                    LOGGER.warn( "flushBuildsWithNoBCList", t);
+                    LOGGER.warn("flushBuildsWithNoBCList", t);
                 }
             }
 

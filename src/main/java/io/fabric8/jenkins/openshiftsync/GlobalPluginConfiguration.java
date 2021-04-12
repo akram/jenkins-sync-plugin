@@ -36,6 +36,7 @@ import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 import hudson.Extension;
 import hudson.Util;
 import hudson.util.ListBoxModel;
+import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.openshift.client.OpenShiftClient;
 import jenkins.model.GlobalConfiguration;
 import jenkins.model.Jenkins;
@@ -61,11 +62,11 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
     private int configMapListInterval = 300;
     private int imageStreamListInterval = 300;
 
-    private final static List<BaseWatcher<?>> watchers = new ArrayList<>();
+    private final static List<ResourceEventHandler<?>> watchers = new ArrayList<>();
 
     private transient ScheduledFuture<?> schedule;
 
-    public final static List<BaseWatcher<?>> getWatchers() {
+    public final static List<ResourceEventHandler<?>> getWatchers() {
         return watchers;
     }
 
@@ -116,6 +117,7 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
     // https://wiki.jenkins-ci.org/display/JENKINS/Credentials+Plugin
     // http://javadoc.jenkins-ci.org/credentials/com/cloudbees/plugins/credentials/common/AbstractIdCredentialsListBoxModel.html
     // https://github.com/jenkinsci/kubernetes-plugin/blob/master/src/main/java/org/csanchez/jenkins/plugins/kubernetes/KubernetesCloud.java
+    @SuppressWarnings("deprecation")
     public static ListBoxModel doFillCredentialsIdItems(String credentialsId) {
         Jenkins jenkins = Jenkins.getInstance();
         if (jenkins == null) {
@@ -246,19 +248,14 @@ public class GlobalPluginConfiguration extends GlobalConfiguration {
 
     private synchronized void configChange() {
         logger.info("OpenShift Sync Plugin processing a newly supplied configuration");
-        synchronized (watchers) {
-            logger.info("Existing watchers: " + watchers);
-            for (BaseWatcher<?> watch : watchers) {
-                watch.stop();
-            }
-            watchers.clear();
-            logger.info("Existing watchers: stopped and cleared : " + watchers);
-            logger.info("Existing scheduled task:  " + schedule);
+        OpenShiftUtils.getInformerFactory().stopAllRegisteredInformers();
+        logger.info("Existing watchers: " + watchers);
+        logger.info("Existing watchers: stopped and cleared : " + watchers);
+        logger.info("Existing scheduled task:  " + schedule);
 
-            if (this.schedule != null && !this.schedule.isCancelled()) {
-                this.schedule.cancel(true);
-                logger.info("Existing scheduled task cancelled:  " + schedule);
-            }
+        if (this.schedule != null && !this.schedule.isCancelled()) {
+            this.schedule.cancel(true);
+            logger.info("Existing scheduled task cancelled:  " + schedule);
         }
 
         OpenShiftClient client = OpenShiftUtils.getOpenShiftClient();

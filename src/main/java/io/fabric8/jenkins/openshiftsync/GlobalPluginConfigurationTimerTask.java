@@ -1,17 +1,12 @@
 package io.fabric8.jenkins.openshiftsync;
 
 import static hudson.init.InitMilestone.COMPLETED;
-import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getAuthenticatedOpenShiftClient;
 import static io.fabric8.jenkins.openshiftsync.OpenShiftUtils.getInformerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.logging.Logger;
 
 import hudson.init.InitMilestone;
 import hudson.triggers.SafeTimerTask;
-import io.fabric8.kubernetes.client.informers.SharedInformerFactory;
-import io.fabric8.openshift.client.OpenShiftClient;
 import jenkins.model.Jenkins;
 
 public class GlobalPluginConfigurationTimerTask extends SafeTimerTask {
@@ -46,27 +41,27 @@ public class GlobalPluginConfigurationTimerTask extends SafeTimerTask {
             }
             logger.info("Initializing all the watchers...");
             String[] namespaces = globalPluginConfiguration.getNamespaces();
-            List<BaseWatcher<?>> watchers = new ArrayList<>();
+//            List<BaseWatcher<?>> watchers = new ArrayList<>();
             for (String namespace : namespaces) {
                 BuildConfigInformer buildConfigInformer = new BuildConfigInformer(namespace);
-                watchers.add(buildConfigInformer);
+//                watchers.add(buildConfigInformer);
                 buildConfigInformer.start();
 
                 BuildInformer buildInformer = new BuildInformer(namespace);
                 buildInformer.start();
-                watchers.add(buildInformer);
+//                watchers.add(buildInformer);
 
                 ConfigMapInformer configMapInformer = new ConfigMapInformer(namespace);
                 configMapInformer.start();
-                watchers.add(configMapInformer);
+//                watchers.add(configMapInformer);
 
                 ImageStreamInformer imageStreamInformer = new ImageStreamInformer(namespace);
                 imageStreamInformer.start();
-                watchers.add(imageStreamInformer);
+//                watchers.add(imageStreamInformer);
 
                 SecretInformer secretInformer = new SecretInformer(namespace);
                 secretInformer.start();
-                watchers.add(secretInformer);
+//                watchers.add(secretInformer);
             }
    
             logger.info("All the watchers have been registered!! ... starting all registered informers");

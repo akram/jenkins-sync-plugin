@@ -40,12 +40,11 @@ import jenkins.security.NotReallyRoleSensitiveCallable;
 
 public class JobProcessor extends NotReallyRoleSensitiveCallable<Void, Exception> {
 
-	private final BuildConfigWatcher jobProcessor;
+//	private final BuildConfigWatcher jobProcessor;
 	private final BuildConfig buildConfig;
     private final static Logger logger = Logger.getLogger(BuildConfigToJobMap.class.getName());
 
-	public JobProcessor(BuildConfigWatcher buildConfigWatcher, BuildConfig buildConfig) {
-		jobProcessor = buildConfigWatcher;
+	public JobProcessor(BuildConfig buildConfig) {
 		this.buildConfig = buildConfig;
 	}
 
